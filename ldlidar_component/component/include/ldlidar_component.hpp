@@ -179,6 +179,12 @@ protected:
   void lidarThreadFunc();
 
   /**
+   * @brief Attempt to reconnect to the lidar after disconnection.
+   * @return True if reconnection successful, false otherwise.
+   */
+  bool reconnectLidar();
+
+  /**
    * @brief Publish laser scan data.
    * @param src The source points.
    * @param lidar_spin_freq The lidar spin frequency.
@@ -225,6 +231,14 @@ private:
   std::thread _lidarThread; ///< Lidar thread.
   bool _threadStop = false; ///< Thread stop flag.
   // <---- Threads
+
+  // ----> Auto-reconnection
+  int _consecutiveTimeouts = 0; ///< Count of consecutive timeout errors.
+  static constexpr int MAX_TIMEOUTS_BEFORE_RECONNECT = 5; ///< Max timeouts before attempting reconnection.
+  static constexpr int MAX_RECONNECTION_ATTEMPTS = 30; ///< Max reconnection attempts (30 seconds, 1 per second).
+  static constexpr int RECONNECTION_RETRY_INTERVAL_MS = 1000; ///< Interval between reconnection attempts in milliseconds.
+  bool _reconnecting = false; ///< Flag indicating reconnection is in progress.
+  // <---- Auto-reconnection
 
   // ----> Diagnostic
   double _pubFreq; ///< Publishing frequency.

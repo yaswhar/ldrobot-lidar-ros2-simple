@@ -1,4 +1,4 @@
-# Copyright 2024 Walter Lucetti
+# Copyright 2022 Walter Lucetti
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,64 +13,58 @@
 # limitations under the License.
 ###########################################################################
 
+"""
+Simple launch file for Raspberry Pi 4 deployment.
+This launches the LDLidar with lifecycle manager for auto-recovery and monitoring.
+No visualization tools (RViz2) included - suitable for headless operation.
+"""
+
 import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
+    """Generate simple launch description for Raspberry Pi deployment."""
     
-    node_name = LaunchConfiguration('node_name')
-
-    # Launch arguments
-    declare_node_name_cmd = DeclareLaunchArgument(
-        'node_name',
-        default_value='ldlidar_node',
-        description='Name of the node'
-    )
-
-    # RVIZ2 settings
-    rviz2_config = os.path.join(
+    # Lifecycle manager configuration file
+    lc_mgr_config_path = os.path.join(
         get_package_share_directory('ldlidar_node'),
-        'config',
-        'ldlidar.rviz'
+        'params',
+        'lifecycle_mgr.yaml'
     )
 
-    # RVIZ2 node
-    rviz2_node = Node(
-        package='rviz2',
-        executable='rviz2',
-        name='rviz2',
+    # Lifecycle manager node - handles auto-recovery and state management
+    lc_mgr_node = Node(
+        package='nav2_lifecycle_manager',
+        executable='lifecycle_manager',
+        name='lifecycle_manager',
         output='screen',
-        arguments=[["-d"], [rviz2_config]]
+        parameters=[lc_mgr_config_path]
     )
 
-    # Include LDLidar with lifecycle manager launch
+    # Include LDLidar launch with lifecycle support
     ldlidar_launch = IncludeLaunchDescription(
         launch_description_source=PythonLaunchDescriptionSource([
             get_package_share_directory('ldlidar_node'),
-            '/launch/ldlidar_with_mgr.launch.py'
+            '/launch/ldlidar_bringup.launch.py'
         ]),
         launch_arguments={
-            'node_name': node_name
+            'node_name': 'ldlidar_node'
         }.items()
     )
 
-    # Define LaunchDescription variable
+    # Build launch description
     ld = LaunchDescription()
-
-    # Launch arguments
-    ld.add_action(declare_node_name_cmd)
-
-    # Launch Nav2 Lifecycle Manager
-    ld.add_action(rviz2_node)
-
-    # Call LDLidar launch
+    
+    # Add lifecycle manager for auto-recovery
+    ld.add_action(lc_mgr_node)
+    
+    # Add LDLidar node
     ld.add_action(ldlidar_launch)
 
     return ld

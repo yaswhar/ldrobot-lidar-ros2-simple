@@ -292,6 +292,9 @@ nav2_util::CallbackReturn LdLidarComponent::on_shutdown(const lc::State & prev_s
     get_logger(), "on_shutdown: " << prev_state.label() << " [" << static_cast<int>(prev_state.id())
                                   << "] -> Finalized");
 
+  // Stop the lidar thread if it's still running
+  stopLidarThread();
+
   _scanPub.reset();
 
   RCLCPP_INFO_STREAM(get_logger(), " + State: 'finalized [4]'. Press Ctrl+C to kill...");
@@ -334,8 +337,14 @@ void LdLidarComponent::publishLaserScan(ldlidar::Points2D & src, double lidar_sp
     return;
   }
   // Adjust the parameters according to the demand
-  angle_min = 0;
-  angle_max = (2 * M_PI);
+  // If angle cropping is enabled, set the angle range accordingly
+  if (_enableAngleCrop) {
+    angle_min = ANGLE_TO_RADIAN(_angleCropMin);
+    angle_max = ANGLE_TO_RADIAN(_angleCropMax);
+  } else {
+    angle_min = 0;
+    angle_max = (2 * M_PI);
+  }
   angle_increment = (angle_max - angle_min) / (float)(beam_size - 1);
   // Calculate the number of scanning points
   if (lidar_spin_freq > 0) {
@@ -367,10 +376,12 @@ void LdLidarComponent::publishLaserScan(ldlidar::Points2D & src, double lidar_sp
         intensity = std::numeric_limits<float>::quiet_NaN();
       }
 
-      if (_enableAngleCrop) { // Angle crop setting, Mask data within the set angle range
-        if ((dir_angle >= _angleCropMin) && (dir_angle <= _angleCropMax)) {
-          range = std::numeric_limits<float>::quiet_NaN();
-          intensity = std::numeric_limits<float>::quiet_NaN();
+      // FIXED: If angle cropping is enabled, filter OUT points OUTSIDE the crop range
+      // (previously it was filtering points INSIDE the range, which was inverted logic)
+      if (_enableAngleCrop) {
+        if ((dir_angle < _angleCropMin) || (dir_angle > _angleCropMax)) {
+          // Skip points outside the crop range - don't process them at all
+          continue;
         }
       }
 
@@ -435,14 +446,24 @@ bool LdLidarComponent::initLidarComm()
     RCLCPP_INFO_STREAM(get_logger(), "***** LDLidar opened on port '" << _serialPort << "' *****");
   } else {
     RCLCPP_ERROR(get_logger(), "!!! LDLidar not opened !!!");
-    exit(EXIT_FAILURE);
+    // During initial configuration, we should exit
+    // During reconnection, we should return false to allow retry
+    if (!_reconnecting) {
+      exit(EXIT_FAILURE);
+    }
+    return false;
   }
 
   if (_lidar->WaitLidarCommConnect(3000)) {
     RCLCPP_INFO(get_logger(), " * LDLidar communication OK");
   } else {
     RCLCPP_ERROR(get_logger(), " !!! LDLidar communication KO !!!");
-    exit(EXIT_FAILURE);
+    // During initial configuration, we should exit
+    // During reconnection, we should return false to allow retry
+    if (!_reconnecting) {
+      exit(EXIT_FAILURE);
+    }
+    return false;
   }
 
   return true;
@@ -498,10 +519,29 @@ void LdLidarComponent::lidarThreadFunc()
         case ldlidar::LidarStatus::NORMAL:
           _lidar->GetLidarScanFreq(lidar_scan_freq);
           publishLaserScan(laser_scan_points, lidar_scan_freq);
+          // Reset timeout counter on successful read
+          _consecutiveTimeouts = 0;
           break;
         case ldlidar::LidarStatus::DATA_TIME_OUT:
+          _consecutiveTimeouts++;
           RCLCPP_ERROR(
-            get_logger(), "get ldlidar data is time out, please check your lidar device.");
+            get_logger(), "get ldlidar data is time out, please check your lidar device. (Timeout %d/%d)",
+            _consecutiveTimeouts, MAX_TIMEOUTS_BEFORE_RECONNECT);
+          
+          // After multiple consecutive timeouts, attempt to reconnect
+          if (_consecutiveTimeouts >= MAX_TIMEOUTS_BEFORE_RECONNECT && !_reconnecting) {
+            RCLCPP_WARN(get_logger(), "Multiple timeouts detected. Attempting to reconnect...");
+            if (reconnectLidar()) {
+              // Successfully reconnected - reset timeout counter and continue
+              _consecutiveTimeouts = 0;
+            } else {
+              RCLCPP_ERROR(get_logger(), "Failed to reconnect after all attempts.");
+              RCLCPP_ERROR(get_logger(), "Stopping lidar thread. Please restart the node.");
+              // Stop the thread instead of calling deactivate() to avoid deadlock
+              // (can't call deactivate from inside the thread that deactivate will try to join)
+              _threadStop = true;
+            }
+          }
           break;
         case ldlidar::LidarStatus::DATA_WAIT:
           break;
@@ -524,14 +564,91 @@ void LdLidarComponent::lidarThreadFunc()
   RCLCPP_DEBUG(get_logger(), "Lidar thread finished");
 }
 
+bool LdLidarComponent::reconnectLidar()
+{
+  _reconnecting = true;
+  
+  RCLCPP_INFO(get_logger(), "Stopping lidar connection...");
+  
+  // Stop the current lidar instance
+  if (_lidar) {
+    _lidar->Stop();
+    std::this_thread::sleep_for(std::chrono::milliseconds(500)); // Give it time to release resources
+  }
+  
+  RCLCPP_INFO(get_logger(), "Attempting to reconnect to lidar on port '%s'...", _serialPort.c_str());
+  RCLCPP_INFO(get_logger(), "Will retry every second for up to 30 seconds. Please reconnect the USB cable.");
+  
+  // Try to reinitialize communication with retries
+  bool success = false;
+  for (int attempt = 1; attempt <= MAX_RECONNECTION_ATTEMPTS; attempt++) {
+    RCLCPP_INFO(get_logger(), "Reconnection attempt %d/%d...", attempt, MAX_RECONNECTION_ATTEMPTS);
+    
+    success = initLidarComm();
+    
+    if (success) {
+      RCLCPP_INFO(get_logger(), "Communication established on attempt %d. Waiting for lidar to stabilize...", attempt);
+      
+      // Critical: Wait longer for the lidar motor to spin up and start producing valid data
+      // The communication might be OK but the lidar hardware needs time to actually start scanning
+      std::this_thread::sleep_for(std::chrono::seconds(3));
+      
+      // Verify that we can actually get data from the lidar
+      RCLCPP_INFO(get_logger(), "Verifying data availability...");
+      ldlidar::Points2D test_scan;
+      bool data_ok = false;
+      
+      // Try to get valid data a few times to ensure the lidar is really working
+      for (int verify_attempt = 0; verify_attempt < 3; verify_attempt++) {
+        ldlidar::LidarStatus status = _lidar->GetLaserScanData(test_scan, _readTimeOut_msec);
+        if (status == ldlidar::LidarStatus::NORMAL && test_scan.size() > 0) {
+          data_ok = true;
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      }
+      
+      if (data_ok) {
+        RCLCPP_INFO(get_logger(), "Successfully reconnected on attempt %d! Lidar is operational.", attempt);
+        break;
+      } else {
+        RCLCPP_WARN(get_logger(), "Connection established but no valid data received. Retrying...");
+        success = false;
+        _lidar->Stop();
+      }
+    }
+    
+    // If not the last attempt, wait before retrying
+    if (attempt < MAX_RECONNECTION_ATTEMPTS) {
+      if (!success) {
+        RCLCPP_WARN(get_logger(), "Reconnection attempt %d failed. Retrying in 1 second...", attempt);
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(RECONNECTION_RETRY_INTERVAL_MS));
+    } else {
+      RCLCPP_ERROR(get_logger(), "All %d reconnection attempts failed. Node will deactivate.", MAX_RECONNECTION_ATTEMPTS);
+    }
+  }
+  
+  _reconnecting = false;
+  
+  return success;
+}
+
 void LdLidarComponent::callback_updateDiagnostic(diagnostic_updater::DiagnosticStatusWrapper & stat)
 {
   rclcpp_lifecycle::State state = get_current_state();
 
   if (state.id() == 3) {  // ACTIVE
-    stat.summary(
-      diagnostic_msgs::msg::DiagnosticStatus::OK, std::string(
-        "Node state: ") + state.label());
+    if (_consecutiveTimeouts > 0) {
+      stat.summary(
+        diagnostic_msgs::msg::DiagnosticStatus::WARN, 
+        "Node active but experiencing timeouts");
+      stat.addf("Consecutive Timeouts", "%d", _consecutiveTimeouts);
+    } else {
+      stat.summary(
+        diagnostic_msgs::msg::DiagnosticStatus::OK, std::string(
+          "Node state: ") + state.label());
+    }
 
     double spin_hz;
     _lidar->GetLidarScanFreq(spin_hz);
@@ -541,6 +658,10 @@ void LdLidarComponent::callback_updateDiagnostic(diagnostic_updater::DiagnosticS
       stat.addf("Publishing", "%.3f Hz", _pubFreq);
     } else {
       stat.add("Publishing", "NO SUBSCRIBERS");
+    }
+    
+    if (_reconnecting) {
+      stat.add("Status", "RECONNECTING");
     }
   } else if (state.id() == 1 || state.id() == 2) {  // UNCONFIGURED || INACTIVE
     stat.summary(

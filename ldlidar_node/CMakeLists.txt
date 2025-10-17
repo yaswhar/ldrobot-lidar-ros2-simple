@@ -79,6 +79,12 @@ install(DIRECTORY
   DESTINATION share/${PROJECT_NAME}
 )
 
+# Install SCRIPTS (Python visualization node)
+install(PROGRAMS
+  scripts/ldlidar_visualizer.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 # Testing
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

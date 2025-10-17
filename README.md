@@ -2,15 +2,23 @@
 
 ## ROS 2 package for LDRobot lidar - Based on Nav2 Lifecycle nodes
 
-[Get the Lidar](#get-the-lidar) • [YouTube Videos](#the-node-in-action) • [Install](#install-the-node) • [Start the Node](#start-the-node) • [Parameters](#parameters) • [RViz2](#display-scan-on-rviz2) • [Robot Integration](#integrate-the-node-in-your-robot) • [Benchmarking](#benchmarking)
+[Get the Lidar](#get-the-lidar) • [Features](#features) • [Install](#installation) • [Quick Start](#quick-start) • [Visualization](#visualization) • [USB Auto-Recovery](#usb-auto-recovery) • [Parameters](#parameters) • [Troubleshooting](#troubleshooting) • [Deployment](#raspberry-pi-deployment)
 
-This package is designed to work with the DToF 2D Lidar sensors [LD19](https://www.ldrobot.com/product/en/112) made by [LDRobot](https://www.ldrobot.com/en).
-
-It can work also with the [LD06](https://www.ldrobot.com/product/en/98) model, but no tests have been performed with it. LD06 cannot work outdoor.
+This package is designed to work with the DToF 2D Lidar sensors [LD19](https://www.ldrobot.com/product/en/112), [LD06](https://www.ldrobot.com/product/en/98), and STL-27L made by [LDRobot](https://www.ldrobot.com/en).
 
 LD19             |  LD06
 :-------------------------:|:-------------------------:
 ![ld19](https://user-images.githubusercontent.com/3648617/204473718-803d25d9-605a-4eaa-a047-d5d3524eead8.png)  |  ![ld06](https://user-images.githubusercontent.com/3648617/204473720-97f72c31-188e-4f5c-b98b-1033a5afe91e.png)
+
+## Features
+
+✨ **New in this version:**
+
+- 🔌 **USB Auto-Recovery**: Automatically reconnects when USB is unplugged and replugged (30-second retry with data verification)
+- 📊 **Lightweight Visualization**: Interactive matplotlib-based polar plot (replaces RViz2 for Raspberry Pi)
+- 🔄 **Lifecycle Management**: Nav2-compatible lifecycle node with robust error handling
+- 🛡️ **Production Ready**: Thread-safe reconnection, deadlock fixes, and comprehensive diagnostics
+- 🎯 **Angle Cropping**: Software-based field of view limiting (configurable min/max angles)
 
 ## Get the lidar
 
@@ -30,45 +38,178 @@ LD19 Lifecycle            |  LD19 outdoor
 :-------------------------:|:-------------------------:
 [![LD19 Lifecycle](https://img.youtube.com/vi/mbKwmK3Yjus/mqdefault.jpg)](https://youtu.be/mbKwmK3Yjus) | [![LD19 outdoor](https://img.youtube.com/vi/zyggXjW6cDo/mqdefault.jpg)](https://youtu.be/zyggXjW6cDo)
 
-## Install the node
+## Installation
 
-The node is designed to work with
+### Requirements
 
-- [ROS 2 Humble](https://docs.ros.org/en/humble/index.html)
-- [ROS 2 Jazzy](https://docs.ros.org/en/jazzy/index.html)
+- **ROS 2 Humble** or **ROS 2 Jazzy** (Rolling not yet supported)
+- **Platform**: Ubuntu 22.04 (x86_64 or ARM64 for Raspberry Pi 4)
+- **Hardware**: LD06, LD19, or STL-27L lidar
 
-> :pushpin: **Note**: [ROS 2 Rolling](https://docs.ros.org/en/rolling/index.html) is not yet supported because of the missing `nav2_utils` dependency
+### Install Steps
 
-Clone the repository in your ROS2 workspace:
+1. **Clone the repository:**
+```bash
+cd ~/ros2_ws/src/
+git clone https://github.com/Myzhar/ldrobot-lidar-ros2.git
+```
 
-    cd ~/ros2_ws/src/ #use your current ros2 workspace folder
-    git clone https://github.com/Myzhar/ldrobot-lidar-ros2.git
+2. **Install dependencies:**
+```bash
+# System dependencies
+sudo apt install libudev-dev
 
-Add dependencies:
+# Python dependencies for visualization (optional)
+sudo apt install python3-matplotlib python3-numpy python3-tk
+```
 
-    sudo apt install libudev-dev
+3. **Set up udev rules:**
+```bash
+cd ~/ros2_ws/src/ldrobot-lidar-ros2/scripts/
+./create_udev_rules.sh
+```
 
-Install the udev rules
+4. **Build the packages:**
+```bash
+cd ~/ros2_ws/
+rosdep install --from-paths src --ignore-src -r -y
+colcon build --packages-select ldlidar_component ldlidar_node --symlink-install --cmake-args=-DCMAKE_BUILD_TYPE=Release
+```
 
-    cd ~/ros2_ws/src/ldrobot-lidar-ros2/scripts/
-    ./create_udev_rules.sh
+5. **Source the workspace:**
+```bash
+source ~/ros2_ws/install/setup.bash
+# Or add to ~/.bashrc for persistence:
+echo "source ~/ros2_ws/install/setup.bash" >> ~/.bashrc
+```
 
-Build the packages:
+## Quick Start
 
-    cd ~/ros2_ws/
-    rosdep install --from-paths src --ignore-src -r -y
-    colcon build --symlink-install --cmake-args=-DCMAKE_BUILD_TYPE=Release
+### Launch with Visualization (Recommended for Development)
 
-Update the environment variables:
+```bash
+ros2 launch ldlidar_node ldlidar_with_viz.launch.py
+```
 
-    echo source $(pwd)/install/local_setup.bash >> ~/.bashrc
-    source ~/.bashrc
+This launches:
+- Lifecycle manager (automatic node activation)
+- Robot state publisher (TF transforms)
+- LDLidar component
+- **Interactive visualization** (matplotlib polar plot)
 
-## Start the node
+### Launch Without Visualization (Headless/Production)
 
-### Launch file with YAML parameters
+```bash
+ros2 launch ldlidar_node ldlidar_with_mgr.launch.py
+```
 
-The default values of the [parameters of the node](#parameters) can be modified by editing the file [`ldlidar.yaml`](ldlidar_node/params/ldlidar.yaml).
+### Verify It's Working
+
+```bash
+# Check if scan data is publishing
+ros2 topic hz /ldlidar_node/scan
+# Expected: ~10-13 Hz
+
+# View scan data
+ros2 topic echo /ldlidar_node/scan
+
+# Check lifecycle state
+ros2 lifecycle get /ldlidar_node
+# Expected: active [3]
+```
+
+## Visualization
+
+### Lightweight Interactive Visualization
+
+Designed as a **RViz2 replacement** for resource-constrained systems like Raspberry Pi 4:
+
+**Features:**
+- 🎨 Real-time polar plot with color-coded range (red=close, blue=far)
+- 🖱️ **Pan**: Left-click and drag
+- 🔍 **Zoom**: Scroll wheel
+- 📏 Auto-adjusts to lidar parameters (range + angle limits)
+- ⚡ Lightweight: Uses matplotlib (CPU-only, ~150MB RAM vs RViz2's 500MB+)
+- 🔌 Works over SSH with X11 forwarding
+
+**Launch with Visualization:**
+```bash
+ros2 launch ldlidar_node ldlidar_with_viz.launch.py
+```
+
+**Configure Visualization Parameters:**
+```bash
+ros2 run ldlidar_node ldlidar_visualizer.py --ros-args \
+  -p scan_topic:=/ldlidar_node/scan \
+  -p update_rate:=10.0 \
+  -p point_size:=5.0 \
+  -p colormap:=jet_r
+```
+
+**For Remote/SSH Use:**
+```bash
+ssh -X user@raspberry-pi
+ros2 launch ldlidar_node ldlidar_with_viz.launch.py
+```
+
+## USB Auto-Recovery
+
+### Automatic Reconnection Feature
+
+The lidar node automatically recovers from USB disconnections **without manual intervention**:
+
+**How It Works:**
+1. 🔴 **Detection**: Counts consecutive timeouts (5 timeouts = ~5 seconds)
+2. 🔄 **Reconnection**: Retries every second for up to 30 seconds
+3. ⏳ **Stabilization**: Waits 3 seconds for motor spin-up
+4. ✅ **Verification**: Confirms actual laser scan data before declaring success
+5. 📊 **Recovery**: Resumes normal operation automatically
+
+**What You'll See:**
+```
+[ERROR] get ldlidar data is time out... (Timeout 1/5)
+[ERROR] get ldlidar data is time out... (Timeout 2/5)
+...
+[WARN] Multiple timeouts detected. Attempting to reconnect...
+[INFO] Will retry every second for up to 30 seconds. Please reconnect the USB cable.
+[INFO] Reconnection attempt 3/30...
+[INFO] Communication established on attempt 3. Waiting for lidar to stabilize...
+[INFO] Verifying data availability...
+[INFO] Successfully reconnected on attempt 3! Lidar is operational.
+```
+
+**User Action Required:**
+- Simply plug the USB cable back in within 30 seconds
+- No need to restart the node or application
+- If 30 seconds elapse, the node deactivates (restart required)
+
+**Key Parameters:**
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| Timeout threshold | 5 | Number of consecutive timeouts before reconnection |
+| Max attempts | 30 | Total reconnection attempts (30 seconds) |
+| Retry interval | 1s | Time between reconnection attempts |
+| Stabilization delay | 3s | Wait for lidar motor to spin up |
+| Data verification | 3 attempts | Confirms valid scan data before success |
+
+## Launch Files
+
+### Available Launch Files
+
+| Launch File | Description | Use Case |
+|-------------|-------------|----------|
+| `ldlidar_bringup.launch.py` | Basic launch (no lifecycle manager) | Manual lifecycle control |
+| `ldlidar_simple.launch.py` | Lifecycle manager only | Headless deployment |
+| `ldlidar_with_mgr.launch.py` | Lifecycle manager + robot state publisher | Production deployment |
+| `ldlidar_with_viz.launch.py` | Everything + visualization | Development/debugging |
+| `ldlidar_rviz2.launch.py` | With RViz2 (desktop only) | Full visualization |
+| `ldlidar_slam.launch.py` | With SLAM Toolbox | Mapping applications |
+
+## Configuration
+
+### Edit Parameters
+
+The default values can be modified in [`ldlidar.yaml`](ldlidar_node/params/ldlidar.yaml):
 
 Open a terminal console and enter the following command to start the node with customized parameters:
 
@@ -113,20 +254,188 @@ The `ldlidar_with_mgr.launch.py` script automatically starts the `ldlidar_node` 
 
 Following the list of node parameters:
 
-- **`general.debug_mode`**: set to `true` to activate debug messages
-- **`comm.serial_port`**: the serial port path
-- **`comm.baudrate`**: the serial port baudrate
-- **`comm.timeout_msec`**: the serial communication timeout in milliseconds
-- **`lidar.model`**: Lidar model [LDLiDAR_LD06, LDLiDAR_LD19, LDLiDAR_STL27L]
-- **`lidar.rot_verse`**: The rotation verse. Use clockwise if the lidar is mounted upsidedown. [CW, CCW]
-- **`lidar.units`**: distance measurement units [M, CM, MM]
-- **`lidar.frame_id`**: TF frame name for the lidar
-- **`lidar.bins`**: set to 0 for dinamic scan size according to rotation speed, set to a fixed value [e.g. 455] for compatibility with SLAM Toolbox
-- **`lidar.range_min`**: minimum scan distance
-- **`lidar.range_max`**: maximum scan distance
-- **`lidar.enable_angle_crop`**: enable angle cropping
-- **`lidar.angle_crop_min`**: minimum cropping angle
-- **`lidar.angle_crop_max`**: maximum cropping angle
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `general.debug_mode` | bool | false | Enable debug messages |
+| `comm.serial_port` | string | `/dev/ldlidar` | Serial port path |
+| `comm.baudrate` | int | 230400 | Serial baudrate (LD19: 230400, STL27L: 921600) |
+| `comm.timeout_msec` | int | 1000 | Communication timeout (ms) |
+| **Lidar Configuration** | | | |
+| `lidar.model` | string | `LDLiDAR_LD19` | Model: LD06, LD19, or STL27L |
+| `lidar.rot_verse` | string | `CCW` | Rotation direction: CW (upside-down) or CCW |
+| `lidar.units` | string | `M` | Distance units: M, CM, or MM |
+| `lidar.frame_id` | string | `ldlidar_link` | TF frame name |
+| `lidar.bins` | int | 455 | Fixed bin count (0=dynamic, 455=SLAM compatible) |
+| `lidar.range_min` | float | 0.02 | Minimum valid range (m) |
+| `lidar.range_max` | float | 12.0 | Maximum valid range (m) |
+| **Angle Cropping** | | | |
+| `lidar.enable_angle_crop` | bool | false | Enable field of view limiting |
+| `lidar.angle_crop_min` | float | 0.0 | Minimum angle (degrees) |
+| `lidar.angle_crop_max` | float | 360.0 | Maximum angle (degrees) |
+
+**Example Configuration for 180° Front Sector:**
+```yaml
+lidar:
+  enable_angle_crop: true
+  angle_crop_min: 270.0  # -90° (left)
+  angle_crop_max: 90.0   # +90° (right)
+  # Result: 180° front arc only
+```
+
+## Troubleshooting
+
+### USB Connection Issues
+
+#### "Permission denied" on serial port
+```bash
+sudo usermod -aG dialout $USER
+sudo reboot
+```
+
+#### Can't find `/dev/ldlidar` or `/dev/ttyUSB0`
+```bash
+# Check USB devices
+ls -l /dev/ttyUSB*
+dmesg | grep tty
+
+# Verify udev rules
+ls -l /dev/ldlidar
+
+# Reinstall udev rules if needed
+cd ~/ros2_ws/src/ldrobot-lidar-ros2/scripts/
+./create_udev_rules.sh
+sudo reboot
+```
+
+#### Auto-recovery not working
+1. **Wait 5 seconds**: Reconnection starts after 5 consecutive timeouts
+2. **Check USB connection**: `ls -l /dev/ttyUSB*` should show device
+3. **Verify power supply**: Raspberry Pi needs 5V, 3A for stable operation
+4. **Try different USB port**: USB 3.0 (blue) ports preferred
+5. **Check cable quality**: Poor cables cause intermittent issues
+
+### Visualization Issues
+
+#### "No display found"
+```bash
+# For SSH, use X11 forwarding
+ssh -X user@raspberry-pi
+
+# Or set DISPLAY manually
+export DISPLAY=:0
+```
+
+#### ImportError: No module named 'tkinter'
+```bash
+sudo apt install python3-tk
+```
+
+#### Slow/laggy visualization
+```bash
+# Reduce update rate
+ros2 run ldlidar_node ldlidar_visualizer.py --ros-args -p update_rate:=5.0
+
+# Or reduce point size
+ros2 run ldlidar_node ldlidar_visualizer.py --ros-args -p point_size:=3.0
+```
+
+### Data Issues
+
+#### No scan data published
+```bash
+# Check node status
+ros2 lifecycle get /ldlidar_node
+
+# Manually activate if needed
+ros2 lifecycle set /ldlidar_node configure
+ros2 lifecycle set /ldlidar_node activate
+
+# Check for errors
+ros2 topic echo /diagnostics
+```
+
+#### Incorrect angle mapping
+The angle cropping logic was fixed in the latest version. If you still see inverted angles:
+```bash
+# Rebuild with latest code
+cd ~/ros2_ws
+colcon build --packages-select ldlidar_component --cmake-clean-cache
+source install/setup.bash
+```
+
+### Performance Issues
+
+#### High CPU usage on Raspberry Pi
+```bash
+# Check current usage
+htop
+
+# Reduce visualization update rate
+ros2 run ldlidar_node ldlidar_visualizer.py --ros-args -p update_rate:=5.0
+
+# Or run without visualization
+ros2 launch ldlidar_node ldlidar_with_mgr.launch.py
+```
+
+## Raspberry Pi Deployment
+
+### System Requirements
+- **Hardware**: Raspberry Pi 4 (2GB minimum, 4GB+ recommended)
+- **OS**: Raspberry Pi OS 64-bit or Ubuntu 22.04 ARM64
+- **ROS**: ROS2 Humble
+- **Power**: 5V, 3A power supply (official adapter recommended)
+
+### Installation on Raspberry Pi
+
+Follow the same [installation steps](#installation) above. For headless deployment:
+
+```bash
+# Install dependencies (skip visualization if not needed)
+sudo apt install libudev-dev
+
+# Build without visualization dependencies
+cd ~/ros2_ws
+colcon build --packages-select ldlidar_component ldlidar_node
+
+# Launch headless
+ros2 launch ldlidar_node ldlidar_with_mgr.launch.py
+```
+
+### Auto-Start on Boot
+
+Create systemd service:
+```bash
+sudo nano /etc/systemd/system/ldlidar.service
+```
+
+Content:
+```ini
+[Unit]
+Description=LDLidar ROS2 Node
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi
+Environment="ROS_DOMAIN_ID=0"
+ExecStart=/bin/bash -c "source /opt/ros/humble/setup.bash && source /home/pi/ros2_ws/install/setup.bash && ros2 launch ldlidar_node ldlidar_with_mgr.launch.py"
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable ldlidar.service
+sudo systemctl start ldlidar.service
+
+# Check status
+sudo systemctl status ldlidar.service
+```
 
 ## Display scan on RViz2
 
@@ -138,7 +447,7 @@ Open a terminal console and enter the following command:
 
 ![Rviz2](./images/ldlidar_rviz2.png)
 
-## Integrate the LDLidar sensor in your robot
+## Robot Integration
 
 Follow these steps to integrate the LDLidar sensor into your robot configuration:
 
@@ -159,6 +468,38 @@ Enjoy your fully integrated lidar system!
 The launch file `ldlidar_slam.launch.py` shows how to use the node with the [SLAM Toolbox](https://github.com/SteveMacenski/slam_toolbox) package to generate a 2D map for robot navigation.
 
 ![Slam](./images/ld19_slam.png)
+
+## Recent Improvements
+
+### Version Highlights
+
+**🔌 USB Auto-Recovery System**
+- Automatic reconnection after USB disconnection
+- 30-second retry window with 1-second intervals
+- 3-second stabilization delay for motor spin-up
+- Data verification before declaring success
+- Thread-safe implementation with deadlock prevention
+
+**📊 Lightweight Visualization**
+- Matplotlib-based polar plot (replaces RViz2)
+- Interactive pan and zoom controls
+- Color-coded range display
+- Auto-adjusts to lidar parameters
+- Optimized for Raspberry Pi 4 (~150MB RAM vs RViz2's 500MB+)
+- Works over SSH with X11 forwarding
+
+**🛠️ Bug Fixes**
+- Fixed inverted angle cropping logic
+- Fixed LaserScan angle_min/angle_max not reflecting crop settings
+- Fixed thread deadlock on deactivation
+- Fixed buffer overflow during shutdown
+- Enhanced reconnection stability
+
+**🎯 Enhanced Angle Cropping**
+- Software-based field of view limiting
+- Configurable min/max angles in degrees
+- Visualization automatically adapts to cropped range
+- Grid lines only drawn within active sensor range
 
 ## Benchmarking
 
@@ -209,3 +550,38 @@ the final result should be similar to
     | [metadata] Idle System CPU Util. (%) : 0.333                                               |
     | [metadata] Benchmark Mode : 3                                                              |
     +--------------------------------------------------------------------------------------------+
+
+---
+
+## Additional Resources
+
+### Documentation
+- [CHANGELOG.md](CHANGELOG.md) - Version history and release notes
+- [CONTRIBUTING.md](CONTRIBUTING.md) - Contribution guidelines
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) - Community guidelines
+
+### External Links
+- [LDRobot Official Website](https://www.ldrobot.com/en)
+- [ROS2 Humble Documentation](https://docs.ros.org/en/humble/)
+- [Nav2 Documentation](https://navigation.ros.org/)
+- [GitHub Repository](https://github.com/Myzhar/ldrobot-lidar-ros2)
+
+### Support
+- **Issues**: [GitHub Issues](https://github.com/Myzhar/ldrobot-lidar-ros2/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/Myzhar/ldrobot-lidar-ros2/discussions)
+
+## License
+
+Apache License 2.0 - See [LICENSE](LICENSE) file for details
+
+## Credits
+
+- **Original Package**: [Myzhar](https://github.com/Myzhar)
+- **USB Auto-Recovery**: Developed for Raspberry Pi 4 deployment
+- **Visualization Node**: Lightweight alternative to RViz2
+- **Contributors**: See [GitHub Contributors](https://github.com/Myzhar/ldrobot-lidar-ros2/graphs/contributors)
+
+---
+
+**Last Updated**: October 17, 2025  
+**Compatible with**: ROS2 Humble, Jazzy | Raspberry Pi 4, x86_64 Desktop
