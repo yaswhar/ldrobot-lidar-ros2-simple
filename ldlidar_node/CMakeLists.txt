@@ -61,12 +61,6 @@ install(DIRECTORY
   DESTINATION share/${PROJECT_NAME}
 )
 
-# Install RVIZ files
-install(DIRECTORY
-  config
-  DESTINATION share/${PROJECT_NAME}
-)
-
 # Install URDF files
 install(DIRECTORY
   urdf
