@@ -29,7 +29,7 @@ namespace ldlidar
 const int QOS_QUEUE_SIZE = 10;
 
 LdLidarComponent::LdLidarComponent(const rclcpp::NodeOptions & options)
-: nav2_util::LifecycleNode("lidar_node", "", options), _diagUpdater(this)
+: rclcpp_lifecycle::LifecycleNode("lidar_node", "", options), _diagUpdater(this)
 {
   RCLCPP_INFO(get_logger(), "****************************************");
   RCLCPP_INFO(get_logger(), " LDRobot DToF Lidar Lifecycle Component ");
@@ -115,7 +115,6 @@ void LdLidarComponent::getCommParams()
 void LdLidarComponent::getLidarParams()
 {
   RCLCPP_INFO(get_logger(), "+++ LIDAR PARAMETERS +++");
-  nav2_util::LifecycleNode::integer_range limits_int;
 
   // ----> Lidar config
   getParam("lidar.model", _lidarModel, _lidarModel, " * Lidar frame: ", "Name of the lidar frame");
@@ -184,7 +183,7 @@ void LdLidarComponent::getLidarParams()
   // <---- Lidar config
 }
 
-nav2_util::CallbackReturn LdLidarComponent::on_configure(const lc::State & prev_state)
+rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn LdLidarComponent::on_configure(const lc::State & prev_state)
 {
   RCLCPP_DEBUG_STREAM(
     get_logger(),
@@ -211,7 +210,7 @@ nav2_util::CallbackReturn LdLidarComponent::on_configure(const lc::State & prev_
 
   // ----> Connect to Lidar
   if (!initLidar()) {
-    return nav2_util::CallbackReturn::ERROR;  // Transition to Finalized state
+    return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::ERROR;  // Transition to Finalized state
     // Note: we could use FAILURE instead of ERROR to remain in unconfigured
     // state and try again to connect
   }
@@ -222,17 +221,14 @@ nav2_util::CallbackReturn LdLidarComponent::on_configure(const lc::State & prev_
     " + State: 'inactive [2]'. Use lifecycle commands to "
     "activate [3], cleanup [2] or shutdown "
     "[6]");
-  return nav2_util::CallbackReturn::SUCCESS;
+  return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::SUCCESS;
 }  // namespace ldlidar
 
-nav2_util::CallbackReturn LdLidarComponent::on_activate(const lc::State & prev_state)
+rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn LdLidarComponent::on_activate(const lc::State & prev_state)
 {
   RCLCPP_DEBUG_STREAM(
     get_logger(), "on_activate: " << prev_state.label() << " [" << static_cast<int>(prev_state.id())
                                   << "] -> Active");
-
-  // create bond connection
-  createBond();
 
   // Activate publisher
   _scanPub->on_activate();
@@ -244,18 +240,15 @@ nav2_util::CallbackReturn LdLidarComponent::on_activate(const lc::State & prev_s
     get_logger(),
     " + State: 'active [3]'. Use lifecycle commands to "
     "deactivate [4] or shutdown [7]");
-  return nav2_util::CallbackReturn::SUCCESS;
+  return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::SUCCESS;
 }
 
-nav2_util::CallbackReturn LdLidarComponent::on_deactivate(const lc::State & prev_state)
+rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn LdLidarComponent::on_deactivate(const lc::State & prev_state)
 {
   RCLCPP_DEBUG_STREAM(
     get_logger(),
     "on_deactivate: " << prev_state.label() << " [" << static_cast<int>(prev_state.id())
                       << "] -> Inactive");
-
-  // destroy bond connection
-  destroyBond();
 
   // Dectivate publisher
   _scanPub->on_deactivate();
@@ -268,10 +261,10 @@ nav2_util::CallbackReturn LdLidarComponent::on_deactivate(const lc::State & prev
     " + State: 'inactive [2]'. Use lifecycle commands to "
     "activate [3], cleanup [2] or shutdown "
     "[6]");
-  return nav2_util::CallbackReturn::SUCCESS;
+  return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::SUCCESS;
 }
 
-nav2_util::CallbackReturn LdLidarComponent::on_cleanup(const lc::State & prev_state)
+rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn LdLidarComponent::on_cleanup(const lc::State & prev_state)
 {
   RCLCPP_DEBUG_STREAM(
     get_logger(), "on_cleanup: " << prev_state.label() << " [" << static_cast<int>(prev_state.id())
@@ -283,10 +276,10 @@ nav2_util::CallbackReturn LdLidarComponent::on_cleanup(const lc::State & prev_st
     get_logger(),
     " + State: 'unconfigured [1]'. Use lifecycle commands "
     "to configure [1] or shutdown [5]");
-  return nav2_util::CallbackReturn::SUCCESS;
+  return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::SUCCESS;
 }
 
-nav2_util::CallbackReturn LdLidarComponent::on_shutdown(const lc::State & prev_state)
+rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn LdLidarComponent::on_shutdown(const lc::State & prev_state)
 {
   RCLCPP_DEBUG_STREAM(
     get_logger(), "on_shutdown: " << prev_state.label() << " [" << static_cast<int>(prev_state.id())
@@ -298,17 +291,17 @@ nav2_util::CallbackReturn LdLidarComponent::on_shutdown(const lc::State & prev_s
   _scanPub.reset();
 
   RCLCPP_INFO_STREAM(get_logger(), " + State: 'finalized [4]'. Press Ctrl+C to kill...");
-  return nav2_util::CallbackReturn::SUCCESS;
+  return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::SUCCESS;
 }
 
-nav2_util::CallbackReturn LdLidarComponent::on_error(const lc::State & prev_state)
+rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn LdLidarComponent::on_error(const lc::State & prev_state)
 {
   RCLCPP_DEBUG_STREAM(
     get_logger(), "on_error: " << prev_state.label() << " [" << static_cast<int>(prev_state.id())
                                << "] -> Finalized");
 
   RCLCPP_INFO_STREAM(get_logger(), " + State: 'finalized [4]'. Press Ctrl+C to kill...");
-  return nav2_util::CallbackReturn::FAILURE;
+  return rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn::FAILURE;
 }
 
 void LdLidarComponent::publishLaserScan(ldlidar::Points2D & src, double lidar_spin_freq)

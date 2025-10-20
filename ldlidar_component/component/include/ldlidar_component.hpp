@@ -29,7 +29,6 @@
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <diagnostic_updater/diagnostic_updater.hpp>
 #include <diagnostic_msgs/msg/diagnostic_status.hpp>
-#include <nav2_util/lifecycle_node.hpp>
 #include "visibility_control.hpp"
 #include "defines.hpp"
 #include "ldlidar_driver.h"
@@ -47,7 +46,7 @@ namespace ldlidar
  * activation, deactivation, cleanup, shutdown, and error handling. It also includes functionality
  * for parameter handling, diagnostic updates, and lidar data processing and publishing.
  */
-class LdLidarComponent : public nav2_util::LifecycleNode
+class LdLidarComponent : public rclcpp_lifecycle::LifecycleNode
 {
 public:
   /**
@@ -67,42 +66,42 @@ public:
    * @param prev_state The previous state of the node.
    * @return The result of the configuration.
    */
-  nav2_util::CallbackReturn on_configure(const lc::State & prev_state) override;
+  rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn on_configure(const lc::State & prev_state) override;
 
   /**
    * @brief Callback for activating the node.
    * @param prev_state The previous state of the node.
    * @return The result of the activation.
    */
-  nav2_util::CallbackReturn on_activate(const lc::State & prev_state) override;
+  rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn on_activate(const lc::State & prev_state) override;
 
   /**
    * @brief Callback for deactivating the node.
    * @param prev_state The previous state of the node.
    * @return The result of the deactivation.
    */
-  nav2_util::CallbackReturn on_deactivate(const lc::State & prev_state) override;
+  rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn on_deactivate(const lc::State & prev_state) override;
 
   /**
    * @brief Callback for cleaning up the node.
    * @param prev_state The previous state of the node.
    * @return The result of the cleanup.
    */
-  nav2_util::CallbackReturn on_cleanup(const lc::State & prev_state) override;
+  rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn on_cleanup(const lc::State & prev_state) override;
 
   /**
    * @brief Callback for shutting down the node.
    * @param prev_state The previous state of the node.
    * @return The result of the shutdown.
    */
-  nav2_util::CallbackReturn on_shutdown(const lc::State & prev_state) override;
+  rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn on_shutdown(const lc::State & prev_state) override;
 
   /**
    * @brief Callback for handling errors in the node.
    * @param prev_state The previous state of the node.
    * @return The result of the error handling.
    */
-  nav2_util::CallbackReturn on_error(const lc::State & prev_state) override;
+  rclcpp_lifecycle::node_interfaces::LifecycleNodeInterface::CallbackReturn on_error(const lc::State & prev_state) override;
 
   /**
    * @brief Callback for updating diagnostic information.
