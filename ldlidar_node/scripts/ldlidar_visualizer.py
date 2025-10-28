@@ -60,7 +60,7 @@ class LidarVisualizer(Node):
         self.get_logger().info(f'LDLidar Visualizer started')
         self.get_logger().info(f'Subscribing to: {scan_topic}')
         self.get_logger().info(f'Update rate: {self.update_rate} Hz')
-        self.get_logger().info('Controls: Left-click drag to pan, Scroll to zoom')
+        self.get_logger().info('Controls: Left-click on a point to show distance/angle, Scroll to zoom')
         
         # Setup matplotlib figure
         self.setup_plot()
@@ -109,10 +109,11 @@ class LidarVisualizer(Node):
         self.cbar = plt.colorbar(self.sm, ax=self.ax, pad=0.05, shrink=0.9)
         self.cbar.set_label('Range (m)', rotation=270, labelpad=15)
         
-        # Initialize scatter plot
+        # Initialize scatter plot with picker enabled for click detection
         self.scatter = self.ax.scatter([], [], c=[], s=self.point_size, 
                                        cmap=self.cmap, norm=self.norm,
-                                       alpha=0.8, edgecolors='none')
+                                       alpha=0.8, edgecolors='none',
+                                       picker=True)  # Enable picking for click events
         
         # Add title with less padding
         self.title = self.ax.set_title('LDLidar Visualization\nWaiting for data...', 
@@ -127,12 +128,13 @@ class LidarVisualizer(Node):
         
         # Enable interactive features
         self.fig.canvas.mpl_connect('scroll_event', self.on_scroll)
-        self.fig.canvas.mpl_connect('button_press_event', self.on_press)
-        self.fig.canvas.mpl_connect('button_release_event', self.on_release)
-        self.fig.canvas.mpl_connect('motion_notify_event', self.on_motion)
+        self.fig.canvas.mpl_connect('pick_event', self.on_pick)  # Use pick_event for point selection
         
-        self.pan_start = None
-        self.panning = False
+        # Store latest scan data for display
+        self.latest_x = np.array([])
+        self.latest_y = np.array([])
+        self.latest_ranges = np.array([])
+        self.latest_angles = np.array([])
         
     def draw_polar_grid(self, max_range):
         """Draw polar grid lines (circles and radial lines)"""
@@ -194,10 +196,11 @@ class LidarVisualizer(Node):
         self.ax.clear()
         self.draw_polar_grid(range_max)
         
-        # Recreate scatter plot after clearing
+        # Recreate scatter plot after clearing with picker enabled
         self.scatter = self.ax.scatter([], [], c=[], s=self.point_size, 
                                        cmap=self.cmap, norm=self.norm,
-                                       alpha=0.8, edgecolors='none')
+                                       alpha=0.8, edgecolors='none',
+                                       picker=True)  # Enable picking
         
         # Update colormap range
         self.norm = Normalize(vmin=self.scan_params['range_min'], 
@@ -229,6 +232,12 @@ class LidarVisualizer(Node):
         adjusted_angles = np.pi/2 - valid_angles  # 90° rotation and negate for CW
         x = valid_ranges * np.cos(adjusted_angles)
         y = valid_ranges * np.sin(adjusted_angles)
+        
+        # Store for click functionality
+        self.latest_x = x
+        self.latest_y = y
+        self.latest_ranges = valid_ranges
+        self.latest_angles = np.degrees(valid_angles)  # Store in degrees for display
         
         # Update scatter plot
         if len(x) > 0:
@@ -286,48 +295,39 @@ class LidarVisualizer(Node):
         self.ax.set_ylim(y_center - new_y_range, y_center + new_y_range)
         self.fig.canvas.draw_idle()
     
-    def on_press(self, event):
-        """Handle mouse button press"""
-        if event.inaxes != self.ax or event.button != 1:  # Left click only
-            return
-        
-        self.panning = True
-        self.pan_start = (event.xdata, event.ydata)
-    
-    def on_release(self, event):
-        """Handle mouse button release"""
-        self.panning = False
-        self.pan_start = None
-    
-    def on_motion(self, event):
-        """Handle mouse motion for panning"""
-        if not self.panning or self.pan_start is None or event.inaxes != self.ax:
-            return
-        
-        # Calculate movement in cartesian coordinates
-        dx = event.xdata - self.pan_start[0]
-        dy = event.ydata - self.pan_start[1]
-        
-        # Get current limits
-        x_min, x_max = self.ax.get_xlim()
-        y_min, y_max = self.ax.get_ylim()
-        
-        # Update limits (pan in opposite direction of drag)
-        self.ax.set_xlim(x_min - dx, x_max - dx)
-        self.ax.set_ylim(y_min - dy, y_max - dy)
-        
-        self.pan_start = (event.xdata, event.ydata)
-        self.fig.canvas.draw_idle()
+    def on_pick(self, event):
+        """Handle pick event when a point is clicked"""
+        # Check if the picked artist is our scatter plot
+        if event.artist == self.scatter:
+            ind = event.ind[0]  # Get the index of the clicked point
+            x_data = self.latest_x[ind]
+            y_data = self.latest_y[ind]
+            range_data = self.latest_ranges[ind]
+            angle_data = self.latest_angles[ind]
+            
+            label_text = f'({range_data:.2f}m, {angle_data:.1f}°)'
+            
+            # Remove previous annotations if any
+            for ann in self.ax.findobj(lambda x: isinstance(x, plt.Annotation)):
+                ann.remove()
+            
+            # Add a new annotation
+            self.ax.annotate(label_text, (x_data, y_data),
+                            xytext=(20, 20), textcoords='offset points',
+                            bbox=dict(boxstyle="round,pad=0.5", fc="yellow", alpha=0.9),
+                            arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0.2'))
+            self.fig.canvas.draw_idle()  # Redraw the canvas
     
     def run(self):
         """Run the visualization"""
         # Setup animation
         interval_ms = int(1000.0 / self.update_rate)
+        # Use full redraws (blit=False) so annotation show/hide works reliably
         self.anim = FuncAnimation(
-            self.fig, 
-            self.update_plot, 
+            self.fig,
+            self.update_plot,
             interval=interval_ms,
-            blit=True,
+            blit=False,
             cache_frame_data=False
         )
         

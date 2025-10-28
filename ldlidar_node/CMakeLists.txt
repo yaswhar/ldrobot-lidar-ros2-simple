@@ -76,6 +76,7 @@ install(DIRECTORY
 # Install SCRIPTS (Python visualization node)
 install(PROGRAMS
   scripts/ldlidar_visualizer.py
+  scripts/ldlidar_stats.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
