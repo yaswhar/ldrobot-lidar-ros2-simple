@@ -130,13 +130,15 @@ def generate_launch_description():
     )
 
     # Statistics logger node
+    # Use x-terminal-emulator which works on most Linux systems
+    # Alternative terminals tried in order: gnome-terminal, xterm, x-terminal-emulator
     stats_logger_node = Node(
         package='ldlidar_node',
         executable='ldlidar_stats_logger.py',
         name='ldlidar_stats_logger',
         output='screen',
         parameters=[params_file_launch],
-        prefix='xterm -geometry 100x30 -fa "Monospace" -fs 14 -title "LDLidar Statistics Logger" -e'  # Larger window with bigger font
+        prefix='x-terminal-emulator -e'  # Works on Raspberry Pi OS and most Debian-based systems
     )
 
     # Create the launch description

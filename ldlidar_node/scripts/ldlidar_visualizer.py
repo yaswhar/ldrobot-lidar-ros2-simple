@@ -60,7 +60,7 @@ class LidarVisualizer(Node):
         self.get_logger().info(f'LDLidar Visualizer started')
         self.get_logger().info(f'Subscribing to: {scan_topic}')
         self.get_logger().info(f'Update rate: {self.update_rate} Hz')
-        self.get_logger().info('Controls: Left-click on a point to show distance/angle, Scroll to zoom')
+        self.get_logger().info('Controls: Left-click point=show data, Left-click empty=clear, Right-click drag=pan, Scroll=zoom')
         
         # Setup matplotlib figure
         self.setup_plot()
@@ -129,7 +129,9 @@ class LidarVisualizer(Node):
         # Enable interactive features
         self.fig.canvas.mpl_connect('scroll_event', self.on_scroll)
         self.fig.canvas.mpl_connect('pick_event', self.on_pick)  # Use pick_event for point selection
-        self.fig.canvas.mpl_connect('button_press_event', self.on_click)  # Handle clicks on empty space
+        self.fig.canvas.mpl_connect('button_press_event', self.on_click)  # Handle clicks (left=clear, right=pan)
+        self.fig.canvas.mpl_connect('button_release_event', self.on_release)  # Handle release for panning
+        self.fig.canvas.mpl_connect('motion_notify_event', self.on_motion)  # Handle mouse motion for panning
         
         # Store latest scan data for display
         self.latest_x = np.array([])
@@ -139,6 +141,10 @@ class LidarVisualizer(Node):
         
         # Flag to track if a pick event occurred
         self.point_was_picked = False
+        
+        # Pan state
+        self.panning = False
+        self.pan_start = None
         
     def draw_polar_grid(self, max_range):
         """Draw polar grid lines (circles and radial lines)"""
@@ -326,9 +332,12 @@ class LidarVisualizer(Node):
             self.fig.canvas.draw_idle()  # Redraw the canvas
     
     def on_click(self, event):
-        """Handle click on empty space to clear annotations"""
-        # Only process left clicks within the axes
-        if event.button == 1 and event.inaxes == self.ax:
+        """Handle click events - left click clears annotations, right click starts panning"""
+        if event.inaxes != self.ax:
+            return
+        
+        # Left click - clear annotations if no point was picked
+        if event.button == 1:
             # Check if a pick event happened (flag is set by on_pick which fires first)
             if not self.point_was_picked:
                 # Remove all annotations
@@ -338,6 +347,39 @@ class LidarVisualizer(Node):
             
             # Reset the flag for next click
             self.point_was_picked = False
+        
+        # Right click - start panning
+        elif event.button == 3:
+            self.panning = True
+            self.pan_start = (event.xdata, event.ydata)
+    
+    def on_release(self, event):
+        """Handle button release - stop panning"""
+        if event.button == 3:
+            self.panning = False
+            self.pan_start = None
+    
+    def on_motion(self, event):
+        """Handle mouse motion for panning"""
+        if not self.panning or self.pan_start is None or event.inaxes != self.ax:
+            return
+        
+        # Calculate the difference
+        dx = event.xdata - self.pan_start[0]
+        dy = event.ydata - self.pan_start[1]
+        
+        # Get current limits
+        x_min, x_max = self.ax.get_xlim()
+        y_min, y_max = self.ax.get_ylim()
+        
+        # Update limits (subtract because we're moving the view, not the data)
+        self.ax.set_xlim(x_min - dx, x_max - dx)
+        self.ax.set_ylim(y_min - dy, y_max - dy)
+        
+        # Update pan start to current position (in the new coordinate system)
+        self.pan_start = (event.xdata - dx, event.ydata - dy)
+        
+        self.fig.canvas.draw_idle()
     
     def run(self):
         """Run the visualization"""
