@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Launch file for LDLidar with Statistics Analyzer and Visualization
+Launch file for LDLidar with Statistics Publisher, Logger, and Visualization
 
 Launches:
 1. Lifecycle manager
 2. Robot state publisher
 3. LDLidar component node (in container)
-4. Statistics analyzer node
-5. Visualization node
+4. Statistics publisher node (publishes to /ldlidar_stats topic)
+5. Statistics logger node (logs topic data to terminal and file)
+6. Visualization node (with click-to-annotate feature)
 
-This is the complete setup with both statistics logging and visualization.
+This is the complete setup with statistics logging and visualization.
 Ideal for development and monitoring on Raspberry Pi 4.
 """
 
@@ -119,13 +120,23 @@ def generate_launch_description():
         }]
     )
 
-    # Statistics analyzer node
-    stats_analyzer_node = Node(
+    # Statistics publisher node
+    stats_publisher_node = Node(
         package='ldlidar_node',
         executable='ldlidar_stats.py',
-        name='ldlidar_stats_analyzer',
+        name='ldlidar_stats_publisher',
         output='screen',
         parameters=[params_file_launch]
+    )
+
+    # Statistics logger node
+    stats_logger_node = Node(
+        package='ldlidar_node',
+        executable='ldlidar_stats_logger.py',
+        name='ldlidar_stats_logger',
+        output='screen',
+        parameters=[params_file_launch],
+        prefix='xterm -geometry 100x30 -fa "Monospace" -fs 14 -title "LDLidar Statistics Logger" -e'  # Larger window with bigger font
     )
 
     # Create the launch description
@@ -143,6 +154,7 @@ def generate_launch_description():
     ld.add_action(container)
     ld.add_action(load_composable_nodes)
     ld.add_action(visualizer_node)
-    ld.add_action(stats_analyzer_node)
+    ld.add_action(stats_publisher_node)
+    ld.add_action(stats_logger_node)
 
     return ld

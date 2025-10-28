@@ -129,12 +129,16 @@ class LidarVisualizer(Node):
         # Enable interactive features
         self.fig.canvas.mpl_connect('scroll_event', self.on_scroll)
         self.fig.canvas.mpl_connect('pick_event', self.on_pick)  # Use pick_event for point selection
+        self.fig.canvas.mpl_connect('button_press_event', self.on_click)  # Handle clicks on empty space
         
         # Store latest scan data for display
         self.latest_x = np.array([])
         self.latest_y = np.array([])
         self.latest_ranges = np.array([])
         self.latest_angles = np.array([])
+        
+        # Flag to track if a pick event occurred
+        self.point_was_picked = False
         
     def draw_polar_grid(self, max_range):
         """Draw polar grid lines (circles and radial lines)"""
@@ -297,6 +301,9 @@ class LidarVisualizer(Node):
     
     def on_pick(self, event):
         """Handle pick event when a point is clicked"""
+        # Set flag to indicate a point was picked
+        self.point_was_picked = True
+        
         # Check if the picked artist is our scatter plot
         if event.artist == self.scatter:
             ind = event.ind[0]  # Get the index of the clicked point
@@ -317,6 +324,20 @@ class LidarVisualizer(Node):
                             bbox=dict(boxstyle="round,pad=0.5", fc="yellow", alpha=0.9),
                             arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0.2'))
             self.fig.canvas.draw_idle()  # Redraw the canvas
+    
+    def on_click(self, event):
+        """Handle click on empty space to clear annotations"""
+        # Only process left clicks within the axes
+        if event.button == 1 and event.inaxes == self.ax:
+            # Check if a pick event happened (flag is set by on_pick which fires first)
+            if not self.point_was_picked:
+                # Remove all annotations
+                for ann in self.ax.findobj(lambda x: isinstance(x, plt.Annotation)):
+                    ann.remove()
+                self.fig.canvas.draw_idle()
+            
+            # Reset the flag for next click
+            self.point_was_picked = False
     
     def run(self):
         """Run the visualization"""
