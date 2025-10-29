@@ -24,10 +24,15 @@
       angle_crop_min: 210.0 # minimum angle for cropping
       angle_crop_max: 330.0 # maximum angle for cropping
 
-# Configuration for ldlidar_stats_analyzer node
-ldlidar_stats_analyzer:
+# Configuration for ldlidar_stats_analyzer node (publisher)
+ldlidar_stats_publisher:
   ros__parameters:
     scan_topic: '/ldlidar_node/scan' # Topic to subscribe for laser scan data
     update_rate: 1.0 # Statistics computation rate in Hz (1.0 = every second)
-    log_file_path: '~/shahrokhi' # Directory path to save statistics log files (use Docker mount path)
+
+# Configuration for ldlidar_stats_logger node (GUI logger)
+ldlidar_stats_logger:
+  ros__parameters:
+    log_file_path: '/workspace/logs' # Directory path to save statistics log files (use Docker mount path)
+    max_display_lines: 500 # Maximum lines to display in GUI window
 
