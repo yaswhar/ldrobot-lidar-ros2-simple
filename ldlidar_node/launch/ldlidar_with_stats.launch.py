@@ -113,16 +113,15 @@ def generate_launch_description():
         parameters=[params_file_launch]
     )
 
-    # Statistics logger node
-    # Use x-terminal-emulator which works on most Linux systems
-    # Alternative terminals tried in order: gnome-terminal, xterm, x-terminal-emulator
+    # Statistics logger node with Tkinter GUI
+    # Optimized for Raspberry Pi - uses built-in Tkinter (no extra packages needed)
+    # Creates a pop-up window with pause/clear controls and automatic memory management
     stats_logger_node = Node(
         package='ldlidar_node',
-        executable='ldlidar_stats_logger.py',
+        executable='ldlidar_stats_logger_gui.py',
         name='ldlidar_stats_logger',
         output='screen',
-        parameters=[params_file_launch],
-        prefix='x-terminal-emulator -e'  # Works on Raspberry Pi OS and most Debian-based systems
+        parameters=[params_file_launch]
     )
 
     # Create the launch description

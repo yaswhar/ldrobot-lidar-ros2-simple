@@ -29,5 +29,5 @@ ldlidar_stats_analyzer:
   ros__parameters:
     scan_topic: '/ldlidar_node/scan' # Topic to subscribe for laser scan data
     update_rate: 1.0 # Statistics computation rate in Hz (1.0 = every second)
-    log_file_path: '~/shahrokhi' # Directory path to save statistics log files
+    log_file_path: '~/shahrokhi' # Directory path to save statistics log files (use Docker mount path)
 
