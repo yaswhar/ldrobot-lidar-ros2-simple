@@ -192,6 +192,62 @@ The lidar node automatically recovers from USB disconnections **without manual i
 | Stabilization delay | 3s | Wait for lidar motor to spin up |
 | Data verification | 3 attempts | Confirms valid scan data before success |
 
+## Ground Scanning Topological Mapper
+
+### Overview
+
+The **Ground Mapper** generates a 2D topological map by stacking LiDAR scans based on drone velocity, simulating a ground scanner that creates a continuous map as the drone moves forward.
+
+**How It Works:**
+- Receives LaserScan messages and converts from polar to Cartesian coordinates
+- Stacks scans along the Y-axis based on configurable drone velocity
+- Displays a real-time scrolling 2D map showing terrain/obstacles
+
+**Quick Start:**
+```bash
+# Launch with default velocity (1.0 m/s)
+ros2 launch ldlidar_node ldlidar_ground_mapper.launch.py
+
+# Launch with custom velocity
+ros2 launch ldlidar_node ldlidar_ground_mapper.launch.py drone_velocity_y:=0.5
+```
+
+**Key Parameters** (configured in `ldlidar.yaml`):
+- `drone_velocity_y`: Forward velocity in m/s (default: 1.0)
+- `map_buffer_time`: Seconds of scan data to keep (default: 10.0)
+- `map_resolution`: Grid resolution in meters/pixel (default: 0.05)
+- `update_rate`: Visualization refresh rate in Hz (default: 10.0)
+- `colormap`: Distance colormap (default: 'viridis')
+
+**Interactive Controls:**
+- **Scroll wheel**: Zoom in/out
+- **Right-click + drag**: Pan the view
+- **Automatic scrolling**: Map scrolls as drone moves forward
+
+**Testing Procedure:**
+```bash
+# 1. Static test (velocity=0) - Verify coordinate conversion
+ros2 launch ldlidar_node ldlidar_ground_mapper.launch.py drone_velocity_y:=0.0
+
+# 2. Slow movement (velocity=0.5) - Verify stacking logic
+ros2 launch ldlidar_node ldlidar_ground_mapper.launch.py drone_velocity_y:=0.5
+
+# 3. Normal operation (velocity=1.0) - Real-world usage
+ros2 launch ldlidar_node ldlidar_ground_mapper.launch.py drone_velocity_y:=1.0
+```
+
+**Algorithm:**
+- Y-position increment: `Δy = velocity_y × Δt`
+- Point conversion: `x = range × cos(angle)`, `y = y_offset + range × sin(angle)`
+- Grid-based mapping with automatic cleanup of old scans
+
+**Performance:**
+- CPU: ~3-5% on Raspberry Pi 4
+- Memory: ~50-200 MB (depends on buffer_time)
+- Grid limit: Auto-scaled to max 2000×2000 pixels
+
+For complete documentation, see [GROUND_MAPPER_IMPLEMENTATION.md](GROUND_MAPPER_IMPLEMENTATION.md) and [GROUND_MAPPER_CHECKLIST.md](GROUND_MAPPER_CHECKLIST.md).
+
 ## Launch Files
 
 ### Available Launch Files
@@ -202,6 +258,7 @@ The lidar node automatically recovers from USB disconnections **without manual i
 | `ldlidar_simple.launch.py` | Lifecycle manager only | Headless deployment |
 | `ldlidar_with_mgr.launch.py` | Lifecycle manager + robot state publisher | Production deployment |
 | `ldlidar_with_viz.launch.py` | Everything + visualization | Development/debugging |
+| `ldlidar_ground_mapper.launch.py` | Everything + ground scanning mapper | Ground mapping/topological mapping |
 | `ldlidar_rviz2.launch.py` | With RViz2 (desktop only) | Full visualization |
 | `ldlidar_slam.launch.py` | With SLAM Toolbox | Mapping applications |
 

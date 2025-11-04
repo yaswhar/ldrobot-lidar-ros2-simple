@@ -36,3 +36,15 @@ ldlidar_stats_logger:
     log_file_path: '/workspace/logs' # Directory path to save statistics log files (use Docker mount path)
     max_display_lines: 500 # Maximum lines to display in GUI window
 
+# Configuration for ldlidar_ground_mapper node
+# Generates 2D topological map by stacking lidar scans based on drone velocity
+ground_mapper:
+  ros__parameters:
+    scan_topic: '/ldlidar_node/scan'  # LaserScan topic to subscribe to
+    drone_velocity_y: 1.0              # Drone velocity in Y-direction (m/s)
+    map_buffer_time: 10.0              # Seconds of scan data to keep in buffer
+    update_rate: 10.0                  # Visualization update rate (Hz)
+    map_resolution: 0.05               # Map resolution in meters per pixel
+    colormap: 'viridis'                # Matplotlib colormap (viridis, jet, hot, cool)
+    save_map: false                    # Enable automatic map saving
+    map_output_dir: '/workspace/maps' # Directory to save map images
