@@ -105,11 +105,17 @@ class GroundMapper(Node):
             self.first_scan_received = True
             
             scan_freq = 1.0 / self.scan_params['scan_time'] if self.scan_params['scan_time'] > 0 else 10.0
+            scan_center_deg = math.degrees((msg.angle_min + msg.angle_max) / 2.0)
+            
             self.get_logger().info(
                 f'First scan received: '
                 f'range=[{msg.range_min:.2f}, {msg.range_max:.2f}]m, '
                 f'angle=[{math.degrees(msg.angle_min):.1f}, {math.degrees(msg.angle_max):.1f}]°, '
                 f'scan_freq={scan_freq:.1f}Hz'
+            )
+            self.get_logger().info(
+                f'Scanning direction: {scan_center_deg:.1f}° '
+                f'(center moves outward in this direction as lidar travels)'
             )
         
         # Calculate time delta and update offset
@@ -245,12 +251,20 @@ class GroundMapper(Node):
         if not self.first_scan_received or not self.scan_buffer:
             return self.scatter,
         
+        # Calculate scanning direction (middle of the scanning arc)
+        scan_center_angle = (self.scan_params['angle_min'] + self.scan_params['angle_max']) / 2.0
+        # Transform to display coordinates (90° rotation, negate for clockwise)
+        scanning_direction_rad = np.pi/2 - scan_center_angle
+        
         # Collect all points from all scans in buffer
+        # Create a snapshot of the buffer to avoid mutation during iteration
         all_x = []
         all_y = []
         all_ranges = []
         
-        for timestamp, offset, angles, ranges in self.scan_buffer:
+        scan_buffer_snapshot = list(self.scan_buffer)  # Create a copy
+        
+        for timestamp, offset, angles, ranges in scan_buffer_snapshot:
             if len(ranges) == 0:
                 continue
             
@@ -259,6 +273,14 @@ class GroundMapper(Node):
             adjusted_angles = np.pi/2 - angles
             x = ranges * np.cos(adjusted_angles)
             y = ranges * np.sin(adjusted_angles)
+            
+            # Apply offset in the scanning direction
+            # Move the center of polar coordinates outward in scanning direction
+            offset_x = offset * np.cos(scanning_direction_rad)
+            offset_y = offset * np.sin(scanning_direction_rad)
+            
+            x = x + offset_x
+            y = y + offset_y
             
             all_x.extend(x)
             all_y.extend(y)
@@ -275,6 +297,21 @@ class GroundMapper(Node):
         # Update scatter plot
         self.scatter.set_offsets(np.c_[all_x, all_y])
         self.scatter.set_array(all_ranges)
+        
+        # Auto-adjust plot limits to show all data with margin
+        if len(all_x) > 0:
+            margin = 0.1  # 10% margin
+            x_min, x_max = np.min(all_x), np.max(all_x)
+            y_min, y_max = np.min(all_y), np.max(all_y)
+            
+            x_range = max(x_max - x_min, 1.0)  # Minimum range of 1m
+            y_range = max(y_max - y_min, 1.0)
+            
+            x_margin = x_range * margin
+            y_margin = y_range * margin
+            
+            self.ax.set_xlim(x_min - x_margin, x_max + x_margin)
+            self.ax.set_ylim(y_min - y_margin, y_max + y_margin)
         
         # Update normalization range
         if len(all_ranges) > 0:
@@ -296,8 +333,11 @@ class GroundMapper(Node):
         else:
             time_span = 0.0
         
+        # Calculate and display scanning direction
+        scan_direction_deg = math.degrees(scan_center_angle)
+        
         self.title.set_text(
-            f'Ground Scanning Map - Polar View (Accumulated Scans)\n'
+            f'Ground Scanning Map - Accumulating in {scan_direction_deg:.0f}° Direction\n'
             f'Scans: {total_scans} | Points: {total_points} | '
             f'Distance: {distance_traveled:.2f}m | Time: {time_span:.1f}s | '
             f'Velocity: {self.drone_velocity_y:.2f}m/s'

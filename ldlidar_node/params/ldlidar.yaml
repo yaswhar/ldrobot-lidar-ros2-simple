@@ -19,8 +19,8 @@
       frame_id: 'ldlidar_link' # TF frame name for the lidar
       bins: 455 # set to 0 for dinamic scan size according to rotation speed, set to a fixed value [e.g. 455] for compatibility with SLAM Toolbox
       range_min: 0.03 # Minimum distance in 'units'
-      range_max: 12.0 # Maximum distance in 'units'
-      enable_angle_crop: false # enable angle cropping
+      range_max: 1.0 # Maximum distance in 'units'
+      enable_angle_crop: true # enable angle cropping
       angle_crop_min: 210.0 # minimum angle for cropping
       angle_crop_max: 330.0 # maximum angle for cropping
 
