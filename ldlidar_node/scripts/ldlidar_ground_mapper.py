@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
 LDLidar Ground Mapper Node
-Generates a 2D topological map by stacking lidar scans in the Y-direction
+Generates a 2D topological map by stacking lidar scans in polar coordinates
 based on drone velocity, simulating a ground scanner.
 
 Features:
 - Subscribes to LaserScan data
-- Stacks scans based on configurable Y-axis velocity
-- Real-time scrolling 2D map visualization
-- Configurable map buffer time and resolution
+- Stacks scans in POLAR coordinates (preserving angle/range format)
+- Displays like ldlidar_visualizer with accumulating points
+- Real-time scrolling visualization showing scan history
+- Configurable map buffer time
 - Optional map saving functionality
 """
 
@@ -34,11 +35,11 @@ class GroundMapper(Node):
         
         # Declare parameters
         self.declare_parameter('scan_topic', '/ldlidar_node/scan')
-        self.declare_parameter('drone_velocity_y', 1.0)  # m/s in Y-direction
+        self.declare_parameter('drone_velocity_y', 1.0)  # m/s in scanning direction
         self.declare_parameter('map_buffer_time', 10.0)  # seconds
         self.declare_parameter('update_rate', 10.0)  # Hz
-        self.declare_parameter('map_resolution', 0.05)  # meters per pixel
-        self.declare_parameter('colormap', 'viridis')  # matplotlib colormap
+        self.declare_parameter('point_size', 3.0)  # Point size for visualization
+        self.declare_parameter('colormap', 'jet_r')  # matplotlib colormap (matches visualizer)
         self.declare_parameter('save_map', False)  # auto-save map images
         self.declare_parameter('map_output_dir', '/workspace/maps')
         
@@ -47,14 +48,15 @@ class GroundMapper(Node):
         self.drone_velocity_y = self.get_parameter('drone_velocity_y').value
         self.map_buffer_time = self.get_parameter('map_buffer_time').value
         self.update_rate = self.get_parameter('update_rate').value
-        self.map_resolution = self.get_parameter('map_resolution').value
+        self.point_size = self.get_parameter('point_size').value
         self.colormap = self.get_parameter('colormap').value
         self.save_map = self.get_parameter('save_map').value
         self.map_output_dir = self.get_parameter('map_output_dir').value
         
-        # Initialize data storage
-        self.scan_buffer = deque()  # [(timestamp, y_offset, scan_msg)]
-        self.y_offset = 0.0  # Current Y position based on velocity
+        # Initialize data storage - store points in polar coordinates
+        # Each entry: (timestamp, offset_distance, angles[], ranges[])
+        self.scan_buffer = deque()
+        self.offset_distance = 0.0  # Current offset distance based on velocity
         self.last_timestamp = None
         self.first_scan_received = False
         
@@ -63,12 +65,9 @@ class GroundMapper(Node):
             'angle_min': 0.0,
             'angle_max': 2 * np.pi,
             'range_min': 0.0,
-            'range_max': 12.0
+            'range_max': 12.0,
+            'scan_time': 0.0  # Will be updated from messages
         }
-        
-        # Map grid
-        self.map_grid = None
-        self.grid_extent = None  # [x_min, x_max, y_min, y_max]
         
         # Subscribe to laser scan
         self.subscription = self.create_subscription(
@@ -79,10 +78,10 @@ class GroundMapper(Node):
         
         self.get_logger().info(f'Ground Mapper started')
         self.get_logger().info(f'Subscribing to: {scan_topic}')
-        self.get_logger().info(f'Drone velocity: {self.drone_velocity_y} m/s')
+        self.get_logger().info(f'Scanning velocity: {self.drone_velocity_y} m/s')
         self.get_logger().info(f'Map buffer: {self.map_buffer_time} seconds')
-        self.get_logger().info(f'Map resolution: {self.map_resolution} m/pixel')
         self.get_logger().info(f'Update rate: {self.update_rate} Hz')
+        self.get_logger().info(f'Display: Polar coordinates (like visualizer with accumulation)')
         
         # Setup matplotlib figure
         self.setup_plot()
@@ -91,7 +90,7 @@ class GroundMapper(Node):
         self.save_counter = 0
         
     def scan_callback(self, msg):
-        """Store scan with timestamp and calculate Y-offset based on velocity"""
+        """Store scan in polar coordinates with offset based on velocity"""
         # Get timestamp in seconds
         current_timestamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         
@@ -101,23 +100,37 @@ class GroundMapper(Node):
             self.scan_params['angle_max'] = msg.angle_max
             self.scan_params['range_min'] = msg.range_min
             self.scan_params['range_max'] = msg.range_max
+            self.scan_params['scan_time'] = msg.scan_time if msg.scan_time > 0 else 0.1
             self.last_timestamp = current_timestamp
             self.first_scan_received = True
+            
+            scan_freq = 1.0 / self.scan_params['scan_time'] if self.scan_params['scan_time'] > 0 else 10.0
             self.get_logger().info(
                 f'First scan received: '
                 f'range=[{msg.range_min:.2f}, {msg.range_max:.2f}]m, '
-                f'angle=[{math.degrees(msg.angle_min):.1f}, {math.degrees(msg.angle_max):.1f}]°'
+                f'angle=[{math.degrees(msg.angle_min):.1f}, {math.degrees(msg.angle_max):.1f}]°, '
+                f'scan_freq={scan_freq:.1f}Hz'
             )
         
-        # Calculate time delta
+        # Calculate time delta and update offset
         if self.last_timestamp is not None:
             delta_t = current_timestamp - self.last_timestamp
-            # Update Y-offset based on velocity
-            delta_y = self.drone_velocity_y * delta_t
-            self.y_offset += delta_y
+            # Calculate distance traveled in scanning direction
+            delta_offset = self.drone_velocity_y * delta_t
+            self.offset_distance += delta_offset
         
-        # Store scan with timestamp and y_offset
-        self.scan_buffer.append((current_timestamp, self.y_offset, msg))
+        # Extract scan data
+        num_points = len(msg.ranges)
+        angles = np.linspace(msg.angle_min, msg.angle_max, num_points)
+        ranges = np.array(msg.ranges)
+        
+        # Filter valid points
+        valid_mask = np.isfinite(ranges) & (ranges >= msg.range_min) & (ranges <= msg.range_max)
+        valid_angles = angles[valid_mask]
+        valid_ranges = ranges[valid_mask]
+        
+        # Store scan with offset (in polar coordinates)
+        self.scan_buffer.append((current_timestamp, self.offset_distance, valid_angles, valid_ranges))
         
         # Update last timestamp
         self.last_timestamp = current_timestamp
@@ -132,46 +145,46 @@ class GroundMapper(Node):
             self.scan_buffer.popleft()
     
     def setup_plot(self):
-        """Setup the matplotlib plot for 2D map visualization"""
+        """Setup the matplotlib plot for polar visualization (like ldlidar_visualizer)"""
         # Create figure
-        self.fig = plt.figure(figsize=(14, 10))
+        self.fig = plt.figure(figsize=(12, 10))
         self.ax = self.fig.add_subplot(111)
+        
+        # Set equal aspect ratio for proper circular display
+        self.ax.set_aspect('equal')
         
         # Use tight layout
         self.fig.tight_layout(pad=2.0)
         
-        # Setup colormap for range visualization
+        # Initial plot limits (will be updated when first scan arrives)
+        max_range = 12.0 * 1.05
+        self.ax.set_xlim(-max_range, max_range)
+        self.ax.set_ylim(-max_range, max_range)
+        
+        # Setup colormap for range visualization (same as visualizer)
         self.norm = Normalize(vmin=0, vmax=12.0)
         self.cmap = plt.get_cmap(self.colormap)
         self.sm = ScalarMappable(norm=self.norm, cmap=self.cmap)
         
         # Add colorbar
-        self.cbar = plt.colorbar(self.sm, ax=self.ax, pad=0.02, shrink=0.9)
+        self.cbar = plt.colorbar(self.sm, ax=self.ax, pad=0.05, shrink=0.9)
         self.cbar.set_label('Range (m)', rotation=270, labelpad=20)
         
-        # Initialize image plot
-        # Start with empty map
-        empty_map = np.zeros((100, 100))
-        self.image = self.ax.imshow(
-            empty_map,
-            cmap=self.cmap,
-            norm=self.norm,
-            origin='lower',
-            aspect='auto',
-            interpolation='nearest',
-            extent=[-6, 6, 0, 10]  # Initial extent [x_min, x_max, y_min, y_max]
-        )
+        # Initialize scatter plot
+        self.scatter = self.ax.scatter([], [], c=[], s=self.point_size,
+                                       cmap=self.cmap, norm=self.norm,
+                                       alpha=0.6, edgecolors='none')
         
         # Labels and title
         self.ax.set_xlabel('X Position (m)', fontsize=12)
-        self.ax.set_ylabel('Y Position - Flight Direction (m)', fontsize=12)
+        self.ax.set_ylabel('Y Position (m)', fontsize=12)
         self.title = self.ax.set_title(
-            'Ground Scanning Topological Map\nWaiting for data...',
+            'Ground Scanning Topological Map (Polar View)\nWaiting for data...',
             pad=10, fontsize=12, fontweight='bold'
         )
         
-        # Add grid
-        self.ax.grid(True, alpha=0.3, linestyle='--', linewidth=0.5)
+        # Draw polar grid
+        self.draw_polar_grid(max_range)
         
         # Enable interactive features
         self.fig.canvas.mpl_connect('scroll_event', self.on_scroll)
@@ -182,139 +195,112 @@ class GroundMapper(Node):
         # Pan state
         self.panning = False
         self.pan_start = None
+    
+    def draw_polar_grid(self, max_range):
+        """Draw polar grid lines (circles and radial lines) - same as visualizer"""
+        # Draw concentric circles
+        num_circles = 6
+        for i in range(1, num_circles + 1):
+            r = (max_range / num_circles) * i
+            circle = plt.Circle((0, 0), r, fill=False, color='gray',
+                               alpha=0.3, linewidth=0.5, linestyle='--')
+            self.ax.add_patch(circle)
+            # Add range labels
+            self.ax.text(0, r, f'{r:.1f}m', ha='center', va='bottom',
+                        fontsize=8, color='gray', alpha=0.7)
         
-    def generate_map(self):
-        """Generate 2D map from scan buffer"""
-        if not self.scan_buffer:
-            return None, None
+        # Draw radial lines within sensor angle range
+        # Transform: rotate by 90° so 0° is at top, negate X for clockwise
+        angle_min_deg = math.degrees(self.scan_params['angle_min'])
+        angle_max_deg = math.degrees(self.scan_params['angle_max'])
         
-        # Collect all valid points
+        # Draw radial lines every 30 degrees
+        start_angle = int(np.ceil(angle_min_deg / 30.0)) * 30
+        sensor_angle_deg = start_angle
+        while sensor_angle_deg <= angle_max_deg:
+            display_angle_rad = np.radians(90 - sensor_angle_deg)
+            x = [0, max_range * np.cos(display_angle_rad)]
+            y = [0, max_range * np.sin(display_angle_rad)]
+            self.ax.plot(x, y, color='gray', alpha=0.3, linewidth=0.5, linestyle='--')
+            # Add angle labels
+            label_r = max_range * 1.05
+            label_x = label_r * np.cos(display_angle_rad)
+            label_y = label_r * np.sin(display_angle_rad)
+            self.ax.text(label_x, label_y, f'{sensor_angle_deg:.0f}°', ha='center', va='center',
+                        fontsize=8, color='gray', alpha=0.7)
+            sensor_angle_deg += 30
+        
+        # Draw boundary lines at exact min/max angles
+        for boundary_angle_deg in [angle_min_deg, angle_max_deg]:
+            display_angle_rad = np.radians(90 - boundary_angle_deg)
+            x = [0, max_range * np.cos(display_angle_rad)]
+            y = [0, max_range * np.sin(display_angle_rad)]
+            self.ax.plot(x, y, color='red', alpha=0.5, linewidth=1.0, linestyle='-')
+        
+        # Draw origin marker
+        self.ax.plot(0, 0, 'k+', markersize=10, markeredgewidth=2)
+        
+    def update_plot(self, frame):
+        """Update the plot with all accumulated scans in polar view"""
+        if not self.first_scan_received or not self.scan_buffer:
+            return self.scatter,
+        
+        # Collect all points from all scans in buffer
         all_x = []
         all_y = []
         all_ranges = []
         
-        for timestamp, y_offset, scan in self.scan_buffer:
-            num_points = len(scan.ranges)
-            angles = np.linspace(scan.angle_min, scan.angle_max, num_points)
-            ranges = np.array(scan.ranges)
-            
-            # Filter valid points
-            valid_mask = np.isfinite(ranges) & (ranges >= scan.range_min) & (ranges <= scan.range_max)
-            valid_angles = angles[valid_mask]
-            valid_ranges = ranges[valid_mask]
-            
-            if len(valid_ranges) == 0:
+        for timestamp, offset, angles, ranges in self.scan_buffer:
+            if len(ranges) == 0:
                 continue
             
-            # Convert polar to cartesian
-            # X: perpendicular to flight direction (scan width)
-            # Y: along flight direction (stacked with offset)
-            x_local = valid_ranges * np.cos(valid_angles)
-            y_local = valid_ranges * np.sin(valid_angles)
+            # Convert polar to cartesian with same transform as visualizer
+            # Rotate by 90° so sensor 0° appears at top, negate X for clockwise
+            adjusted_angles = np.pi/2 - angles
+            x = ranges * np.cos(adjusted_angles)
+            y = ranges * np.sin(adjusted_angles)
             
-            # Apply Y-offset for stacking
-            y_global = y_offset + y_local
-            
-            all_x.extend(x_local)
-            all_y.extend(y_global)
-            all_ranges.extend(valid_ranges)
+            all_x.extend(x)
+            all_y.extend(y)
+            all_ranges.extend(ranges)
         
         if not all_x:
-            return None, None
+            return self.scatter,
         
+        # Convert to numpy arrays
         all_x = np.array(all_x)
         all_y = np.array(all_y)
         all_ranges = np.array(all_ranges)
         
-        # Calculate map bounds
-        x_min, x_max = np.min(all_x), np.max(all_x)
-        y_min, y_max = np.min(all_y), np.max(all_y)
-        
-        # Add small margin
-        x_margin = (x_max - x_min) * 0.05 if x_max > x_min else 0.5
-        y_margin = (y_max - y_min) * 0.05 if y_max > y_min else 0.5
-        
-        x_min -= x_margin
-        x_max += x_margin
-        y_min -= y_margin
-        y_max += y_margin
-        
-        # Calculate grid dimensions
-        grid_width = int(np.ceil((x_max - x_min) / self.map_resolution))
-        grid_height = int(np.ceil((y_max - y_min) / self.map_resolution))
-        
-        # Limit grid size to prevent memory issues
-        max_grid_size = 2000
-        if grid_width > max_grid_size or grid_height > max_grid_size:
-            scale = max(grid_width / max_grid_size, grid_height / max_grid_size)
-            grid_width = int(grid_width / scale)
-            grid_height = int(grid_height / scale)
-            self.get_logger().warn(f'Grid size limited to {grid_width}x{grid_height}')
-        
-        # Create empty grid
-        map_grid = np.full((grid_height, grid_width), np.nan)
-        
-        # Populate grid
-        for i in range(len(all_x)):
-            x = all_x[i]
-            y = all_y[i]
-            r = all_ranges[i]
-            
-            # Convert to grid coordinates
-            grid_x = int((x - x_min) / self.map_resolution)
-            grid_y = int((y - y_min) / self.map_resolution)
-            
-            # Check bounds
-            if 0 <= grid_x < grid_width and 0 <= grid_y < grid_height:
-                # Use minimum distance if multiple points fall in same cell
-                if np.isnan(map_grid[grid_y, grid_x]):
-                    map_grid[grid_y, grid_x] = r
-                else:
-                    map_grid[grid_y, grid_x] = min(map_grid[grid_y, grid_x], r)
-        
-        # Grid extent for imshow
-        extent = [x_min, x_max, y_min, y_max]
-        
-        return map_grid, extent
-    
-    def update_plot(self, frame):
-        """Update the plot with latest map data"""
-        if not self.first_scan_received or not self.scan_buffer:
-            return self.image,
-        
-        # Generate map
-        map_grid, extent = self.generate_map()
-        
-        if map_grid is None:
-            return self.image,
-        
-        # Update image
-        self.image.set_data(map_grid)
-        self.image.set_extent(extent)
+        # Update scatter plot
+        self.scatter.set_offsets(np.c_[all_x, all_y])
+        self.scatter.set_array(all_ranges)
         
         # Update normalization range
-        valid_data = map_grid[~np.isnan(map_grid)]
-        if len(valid_data) > 0:
-            data_min = np.min(valid_data)
-            data_max = np.max(valid_data)
+        if len(all_ranges) > 0:
+            data_min = self.scan_params['range_min']
+            data_max = self.scan_params['range_max']
             self.norm = Normalize(vmin=data_min, vmax=data_max)
-            self.image.set_norm(self.norm)
+            self.scatter.set_norm(self.norm)
             self.sm.set_norm(self.norm)
             self.cbar.update_normal(self.sm)
         
-        # Auto-adjust axis limits to show all data
-        self.ax.set_xlim(extent[0], extent[1])
-        self.ax.set_ylim(extent[2], extent[3])
-        
         # Update title with stats
         total_scans = len(self.scan_buffer)
-        total_points = np.sum(~np.isnan(map_grid))
-        y_travel = self.y_offset
+        total_points = len(all_ranges)
+        distance_traveled = self.offset_distance
+        
+        # Calculate time span
+        if total_scans > 0:
+            time_span = self.scan_buffer[-1][0] - self.scan_buffer[0][0]
+        else:
+            time_span = 0.0
         
         self.title.set_text(
-            f'Ground Scanning Topological Map\n'
+            f'Ground Scanning Map - Polar View (Accumulated Scans)\n'
             f'Scans: {total_scans} | Points: {total_points} | '
-            f'Y-Travel: {y_travel:.2f}m | Velocity: {self.drone_velocity_y:.2f}m/s'
+            f'Distance: {distance_traveled:.2f}m | Time: {time_span:.1f}s | '
+            f'Velocity: {self.drone_velocity_y:.2f}m/s'
         )
         
         # Save map if enabled
@@ -322,7 +308,7 @@ class GroundMapper(Node):
             self.save_map_image()
         self.save_counter += 1
         
-        return self.image,
+        return self.scatter,
     
     def save_map_image(self):
         """Save current map as image file"""
@@ -354,7 +340,7 @@ class GroundMapper(Node):
         # Zoom factor
         zoom_factor = 1.2 if event.button == 'down' else 0.8
         
-        # Calculate new limits centered on mouse position
+        # Calculate new limits centered on mouse position or current center
         if event.xdata is not None and event.ydata is not None:
             x_center = event.xdata
             y_center = event.ydata
@@ -367,6 +353,13 @@ class GroundMapper(Node):
         
         new_x_range = x_range * zoom_factor
         new_y_range = y_range * zoom_factor
+        
+        # Don't zoom out beyond original limits
+        max_range = self.scan_params['range_max'] * 1.05
+        if new_x_range > max_range:
+            new_x_range = max_range
+        if new_y_range > max_range:
+            new_y_range = max_range
         
         # Don't zoom in too much
         if new_x_range < 0.5:
