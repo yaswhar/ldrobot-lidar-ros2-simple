@@ -17,23 +17,23 @@
       rot_verse: 'CW' # 'CW' -> `CLOCKWISE` / 'CCW' -> `COUNTERCLOCKWISE` [ROS STANDARD]
       units: 'M' # 'MM' -> `MILLIMETERS` / 'CM' -> `CENTIMETERS` / 'M' -> `METERS` [ROS STANDARD]
       frame_id: 'ldlidar_link' # TF frame name for the lidar
-      bins: 455 # set to 0 for dinamic scan size according to rotation speed, set to a fixed value [e.g. 455] for compatibility with SLAM Toolbox
+      bins: 455 # set to 0 for dynamic scan size according to rotation speed, set to a fixed value [e.g. 455] for compatibility with SLAM Toolbox
       range_min: 0.03 # Minimum distance in 'units'
-      range_max: 1.0 # Maximum distance in 'units'
+      range_max: 2.0 # Maximum distance in 'units'
       enable_angle_crop: true # enable angle cropping
-      angle_crop_min: 210.0 # minimum angle for cropping
-      angle_crop_max: 330.0 # maximum angle for cropping
+      angle_crop_min: 230.0 # minimum angle for cropping
+      angle_crop_max: 310.0 # maximum angle for cropping
 
 # Configuration for ldlidar_stats_analyzer node (publisher)
 ldlidar_stats_publisher:
   ros__parameters:
     scan_topic: '/ldlidar_node/scan' # Topic to subscribe for laser scan data
-    update_rate: 1.0 # Statistics computation rate in Hz (1.0 = every second)
+    update_rate: 10.0 # Statistics computation rate in Hz (1.0 = every second)
 
 # Configuration for ldlidar_stats_logger node (GUI logger)
 ldlidar_stats_logger:
   ros__parameters:
-    log_file_path: '/workspace/logs' # Directory path to save statistics log files (use Docker mount path)
+    log_file_path: '~/shahrokhi' # Directory path to save statistics log files (use Docker mount path)
     max_display_lines: 500 # Maximum lines to display in GUI window
 
 # Configuration for ldlidar_ground_mapper node
@@ -41,10 +41,17 @@ ldlidar_stats_logger:
 ground_mapper:
   ros__parameters:
     scan_topic: '/ldlidar_node/scan'  # LaserScan topic to subscribe to
-    drone_velocity_y: 1.0              # Drone velocity in scanning direction (m/s)
-    map_buffer_time: 10.0              # Seconds of scan data to keep in buffer
+    drone_velocity: 1.0                # Drone velocity in any direction (m/s)
+    map_buffer_time: 60.0              # Seconds of scan data to keep in buffer
     update_rate: 10.0                  # Visualization update rate (Hz)
     point_size: 3.0                    # Point size for scatter plot visualization
     colormap: 'jet_r'                  # Matplotlib colormap (jet_r, viridis, hot, cool)
-    save_map: false                    # Enable automatic map saving
-    map_output_dir: '/workspace/maps' # Directory to save map images
+
+# Configuration for ldlidar_ground_mapper_logger node
+# Logs complete point cloud data for offline topological map generation
+ground_mapper_logger:
+  ros__parameters:
+    scan_topic: '/ldlidar_node/scan'  # LaserScan topic to subscribe to
+    drone_velocity: 1.0                # Drone velocity in any direction (m/s)
+    log_output_dir: '~/shahrokhi/ground_logs' # Directory to save log files
+    log_interval: 0.1                  # Log interval in seconds (10 Hz)

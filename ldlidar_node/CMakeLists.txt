@@ -80,6 +80,7 @@ install(PROGRAMS
   scripts/ldlidar_stats_logger.py
   scripts/ldlidar_stats_logger_gui.py
   scripts/ldlidar_ground_mapper.py
+  scripts/ldlidar_ground_mapper_logger.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

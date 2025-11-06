@@ -35,23 +35,19 @@ class GroundMapper(Node):
         
         # Declare parameters
         self.declare_parameter('scan_topic', '/ldlidar_node/scan')
-        self.declare_parameter('drone_velocity_y', 1.0)  # m/s in scanning direction
-        self.declare_parameter('map_buffer_time', 10.0)  # seconds
+        self.declare_parameter('drone_velocity', 1.0)  # m/s in any direction
+        self.declare_parameter('map_buffer_time', 120.0)  # seconds (2 minutes default)
         self.declare_parameter('update_rate', 10.0)  # Hz
         self.declare_parameter('point_size', 3.0)  # Point size for visualization
         self.declare_parameter('colormap', 'jet_r')  # matplotlib colormap (matches visualizer)
-        self.declare_parameter('save_map', False)  # auto-save map images
-        self.declare_parameter('map_output_dir', '/workspace/maps')
         
         # Get parameters
         scan_topic = self.get_parameter('scan_topic').value
-        self.drone_velocity_y = self.get_parameter('drone_velocity_y').value
+        self.drone_velocity = self.get_parameter('drone_velocity').value
         self.map_buffer_time = self.get_parameter('map_buffer_time').value
         self.update_rate = self.get_parameter('update_rate').value
         self.point_size = self.get_parameter('point_size').value
         self.colormap = self.get_parameter('colormap').value
-        self.save_map = self.get_parameter('save_map').value
-        self.map_output_dir = self.get_parameter('map_output_dir').value
         
         # Initialize data storage - store points in polar coordinates
         # Each entry: (timestamp, offset_distance, angles[], ranges[])
@@ -78,19 +74,24 @@ class GroundMapper(Node):
         
         self.get_logger().info(f'Ground Mapper started')
         self.get_logger().info(f'Subscribing to: {scan_topic}')
-        self.get_logger().info(f'Scanning velocity: {self.drone_velocity_y} m/s')
-        self.get_logger().info(f'Map buffer: {self.map_buffer_time} seconds')
+        self.get_logger().info(f'Drone velocity: {self.drone_velocity} m/s')
+        self.get_logger().info(f'Map buffer: {self.map_buffer_time} seconds ({self.map_buffer_time/60:.1f} minutes)')
         self.get_logger().info(f'Update rate: {self.update_rate} Hz')
         self.get_logger().info(f'Display: Polar coordinates (like visualizer with accumulation)')
+        self.get_logger().info('Controls: Right-click drag=pan, Scroll=zoom, Space=pause')
         
         # Setup matplotlib figure
         self.setup_plot()
         
-        # Save counter
-        self.save_counter = 0
+        # Pause state (set in setup_plot, but initialize here too for clarity)
+        self.paused = False
         
     def scan_callback(self, msg):
         """Store scan in polar coordinates with offset based on velocity"""
+        # Skip if paused
+        if self.paused:
+            return
+            
         # Get timestamp in seconds
         current_timestamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         
@@ -122,7 +123,7 @@ class GroundMapper(Node):
         if self.last_timestamp is not None:
             delta_t = current_timestamp - self.last_timestamp
             # Calculate distance traveled in scanning direction
-            delta_offset = self.drone_velocity_y * delta_t
+            delta_offset = self.drone_velocity * delta_t
             self.offset_distance += delta_offset
         
         # Extract scan data
@@ -152,15 +153,18 @@ class GroundMapper(Node):
     
     def setup_plot(self):
         """Setup the matplotlib plot for polar visualization (like ldlidar_visualizer)"""
-        # Create figure
-        self.fig = plt.figure(figsize=(12, 10))
+        # Create figure with smaller size
+        self.fig = plt.figure(figsize=(10, 8))
         self.ax = self.fig.add_subplot(111)
         
         # Set equal aspect ratio for proper circular display
-        self.ax.set_aspect('equal')
+        self.ax.set_aspect('equal', adjustable='box')
         
         # Use tight layout
         self.fig.tight_layout(pad=2.0)
+        
+        # Pause state
+        self.paused = False
         
         # Initial plot limits (will be updated when first scan arrives)
         max_range = 12.0 * 1.05
@@ -197,10 +201,17 @@ class GroundMapper(Node):
         self.fig.canvas.mpl_connect('button_press_event', self.on_click)
         self.fig.canvas.mpl_connect('button_release_event', self.on_release)
         self.fig.canvas.mpl_connect('motion_notify_event', self.on_motion)
+        self.fig.canvas.mpl_connect('key_press_event', self.on_key_press)
         
         # Pan state
         self.panning = False
         self.pan_start = None
+        
+        # Add pause button
+        from matplotlib.widgets import Button
+        pause_ax = self.fig.add_axes([0.81, 0.025, 0.15, 0.04])
+        self.pause_btn = Button(pause_ax, 'Pause')
+        self.pause_btn.on_clicked(self.toggle_pause)
     
     def draw_polar_grid(self, max_range):
         """Draw polar grid lines (circles and radial lines) - same as visualizer"""
@@ -298,20 +309,46 @@ class GroundMapper(Node):
         self.scatter.set_offsets(np.c_[all_x, all_y])
         self.scatter.set_array(all_ranges)
         
-        # Auto-adjust plot limits to show all data with margin
-        if len(all_x) > 0:
+        # Calculate the chord length for y-axis based on angle crop range
+        angle_span = self.scan_params['angle_max'] - self.scan_params['angle_min']
+        max_range = self.scan_params['range_max']
+        # Chord length = 2 * R * sin(angle_span / 2)
+        # Use 1.2 times the max_range for the effective radius
+        effective_radius = max_range * 1.2
+        chord_length = 2 * effective_radius * np.sin(angle_span / 2)
+        
+        # Auto-adjust plot limits to follow the lidar (only if not paused)
+        # When paused, user can manually pan to see historical data
+        if len(all_x) > 0 and not self.paused:
             margin = 0.1  # 10% margin
+            
+            # Get the extent of current data
             x_min, x_max = np.min(all_x), np.max(all_x)
             y_min, y_max = np.min(all_y), np.max(all_y)
             
-            x_range = max(x_max - x_min, 1.0)  # Minimum range of 1m
-            y_range = max(y_max - y_min, 1.0)
+            # Window dimensions based on specifications:
+            # Height: 1.2 times the chord length
+            # Width: 2 times the height
+            window_height = chord_length * 1.2
+            window_width = window_height * 2.0
             
-            x_margin = x_range * margin
-            y_margin = y_range * margin
+            # Center the view on the CURRENT lidar position (latest offset)
+            # This ensures the window follows the lidar in real-time
+            # Calculate current lidar center position based on offset and scanning direction
+            current_lidar_x = self.offset_distance * np.cos(scanning_direction_rad)
+            current_lidar_y = self.offset_distance * np.sin(scanning_direction_rad)
             
-            self.ax.set_xlim(x_min - x_margin, x_max + x_margin)
-            self.ax.set_ylim(y_min - y_margin, y_max + y_margin)
+            # Use the current lidar position as the view center for both axes
+            view_center_x = current_lidar_x
+            view_center_y = current_lidar_y
+            
+            # Add margin
+            x_margin = window_width * margin
+            y_margin = window_height * margin
+            
+            # Set limits with the lidar-centered view
+            self.ax.set_xlim(view_center_x - window_width/2 - x_margin, view_center_x + window_width/2 + x_margin)
+            self.ax.set_ylim(view_center_y - window_height/2 - y_margin, view_center_y + window_height/2 + y_margin)
         
         # Update normalization range
         if len(all_ranges) > 0:
@@ -336,37 +373,31 @@ class GroundMapper(Node):
         # Calculate and display scanning direction
         scan_direction_deg = math.degrees(scan_center_angle)
         
+        pause_status = " [PAUSED]" if self.paused else ""
         self.title.set_text(
-            f'Ground Scanning Map - Accumulating in {scan_direction_deg:.0f}° Direction\n'
+            f'Ground Scanning Map - Accumulating in {scan_direction_deg:.0f}° Direction{pause_status}\n'
             f'Scans: {total_scans} | Points: {total_points} | '
             f'Distance: {distance_traveled:.2f}m | Time: {time_span:.1f}s | '
-            f'Velocity: {self.drone_velocity_y:.2f}m/s'
+            f'Velocity: {self.drone_velocity:.2f}m/s'
         )
-        
-        # Save map if enabled
-        if self.save_map and self.save_counter % 100 == 0:  # Save every 100 frames
-            self.save_map_image()
-        self.save_counter += 1
         
         return self.scatter,
     
-    def save_map_image(self):
-        """Save current map as image file"""
-        try:
-            # Create output directory if it doesn't exist
-            if not os.path.exists(self.map_output_dir):
-                os.makedirs(self.map_output_dir)
-            
-            # Generate filename with timestamp
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            filename = f'ground_map_{timestamp}.png'
-            filepath = os.path.join(self.map_output_dir, filename)
-            
-            # Save figure
-            self.fig.savefig(filepath, dpi=150, bbox_inches='tight')
-            self.get_logger().info(f'Map saved to: {filepath}')
-        except Exception as e:
-            self.get_logger().error(f'Failed to save map: {str(e)}')
+    def toggle_pause(self, event=None):
+        """Toggle pause state"""
+        self.paused = not self.paused
+        if self.paused:
+            self.pause_btn.label.set_text('Resume')
+            self.get_logger().info('Ground mapper paused')
+        else:
+            self.pause_btn.label.set_text('Pause')
+            self.get_logger().info('Ground mapper resumed')
+        self.fig.canvas.draw_idle()
+    
+    def on_key_press(self, event):
+        """Handle keyboard shortcuts"""
+        if event.key == ' ':  # Space bar to toggle pause
+            self.toggle_pause()
     
     def on_scroll(self, event):
         """Handle zoom with scroll wheel"""
