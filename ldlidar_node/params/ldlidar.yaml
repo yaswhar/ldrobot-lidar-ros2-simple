@@ -1,6 +1,4 @@
-# config/ldlidar.yaml
-#
-# Example configuration file to configure a `ldlidar_node`
+# ldlidar_node/params/ldlidar.yaml
 
 /**:
   ros__parameters:
@@ -23,35 +21,28 @@
       enable_angle_crop: true # enable angle cropping
       angle_crop_min: 230.0 # minimum angle for cropping
       angle_crop_max: 310.0 # maximum angle for cropping
+    
+    # --- SHARED OPERATIONAL PARAMETERS ---
+    scan_topic: '/ldlidar_node/scan' # Topic to subscribe for laser scan data
+    drone_velocity: 1.0 # Statistics computation rate in Hz (1.0 = every second)
 
-# Configuration for ldlidar_stats_analyzer node (publisher)
 ldlidar_stats_publisher:
   ros__parameters:
-    scan_topic: '/ldlidar_node/scan' # Topic to subscribe for laser scan data
     update_rate: 10.0 # Statistics computation rate in Hz (1.0 = every second)
 
-# Configuration for ldlidar_stats_logger node (GUI logger)
 ldlidar_stats_logger:
   ros__parameters:
     log_file_path: '~/shahrokhi' # Directory path to save statistics log files (use Docker mount path)
     max_display_lines: 500 # Maximum lines to display in GUI window
 
-# Configuration for ldlidar_ground_mapper node
-# Generates 2D topological map by stacking lidar scans in polar coordinates
 ground_mapper:
   ros__parameters:
-    scan_topic: '/ldlidar_node/scan'  # LaserScan topic to subscribe to
-    drone_velocity: 1.0                # Drone velocity in any direction (m/s)
-    map_buffer_time: 60.0              # Seconds of scan data to keep in buffer
-    update_rate: 10.0                  # Visualization update rate (Hz)
-    point_size: 3.0                    # Point size for scatter plot visualization
-    colormap: 'jet_r'                  # Matplotlib colormap (jet_r, viridis, hot, cool)
+    map_buffer_time: 120.0 # Seconds of scan data to keep in buffer
+    update_rate: 10.0 # Visualization update rate (Hz)
+    point_size: 3.0 # Point size for scatter plot visualization
+    colormap: 'jet_r' # Matplotlib colormap (jet_r, viridis, hot, cool)
 
-# Configuration for ldlidar_ground_mapper_logger node
-# Logs complete point cloud data for offline topological map generation
 ground_mapper_logger:
   ros__parameters:
-    scan_topic: '/ldlidar_node/scan'  # LaserScan topic to subscribe to
-    drone_velocity: 1.0                # Drone velocity in any direction (m/s)
     log_output_dir: '~/shahrokhi/ground_logs' # Directory to save log files
-    log_interval: 0.1                  # Log interval in seconds (10 Hz)
+    log_interval: 0.1 # Log interval in seconds (10 Hz)

@@ -33,17 +33,24 @@ class GroundMapper(Node):
     def __init__(self):
         super().__init__('ldlidar_ground_mapper')
         
-        # Declare parameters
+        # Declare parameters - read from shared /** namespace
         self.declare_parameter('scan_topic', '/ldlidar_node/scan')
-        self.declare_parameter('drone_velocity', 1.0)  # m/s in any direction
-        self.declare_parameter('map_buffer_time', 120.0)  # seconds (2 minutes default)
-        self.declare_parameter('update_rate', 10.0)  # Hz
-        self.declare_parameter('point_size', 3.0)  # Point size for visualization
-        self.declare_parameter('colormap', 'jet_r')  # matplotlib colormap (matches visualizer)
+        self.declare_parameter('drone_velocity', 1.0)
+        self.declare_parameter('lidar.angle_crop_min', 0.0)
+        self.declare_parameter('lidar.angle_crop_max', 360.0)
+        self.declare_parameter('lidar.range_max', 12.0)
         
-        # Get parameters
+        # Node-specific parameters from ground_mapper namespace
+        self.declare_parameter('map_buffer_time', 120.0)
+        self.declare_parameter('update_rate', 10.0)
+        self.declare_parameter('point_size', 3.0)
+        self.declare_parameter('colormap', 'jet_r')
+        
+        # Get shared parameters
         scan_topic = self.get_parameter('scan_topic').value
         self.drone_velocity = self.get_parameter('drone_velocity').value
+        
+        # Get node-specific parameters
         self.map_buffer_time = self.get_parameter('map_buffer_time').value
         self.update_rate = self.get_parameter('update_rate').value
         self.point_size = self.get_parameter('point_size').value
@@ -310,8 +317,11 @@ class GroundMapper(Node):
         self.scatter.set_array(all_ranges)
         
         # Calculate the chord length for y-axis based on angle crop range
-        angle_span = self.scan_params['angle_max'] - self.scan_params['angle_min']
-        max_range = self.scan_params['range_max']
+        # Use configured angle crop parameters from YAML
+        angle_crop_min_rad = np.radians(self.angle_crop_min)
+        angle_crop_max_rad = np.radians(self.angle_crop_max)
+        angle_span = angle_crop_max_rad - angle_crop_min_rad
+        max_range = self.range_max
         # Chord length = 2 * R * sin(angle_span / 2)
         # Use 1.2 times the max_range for the effective radius
         effective_radius = max_range * 1.2

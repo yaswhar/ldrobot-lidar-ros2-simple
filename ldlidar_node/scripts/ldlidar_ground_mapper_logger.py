@@ -26,15 +26,25 @@ class GroundMapperLogger(Node):
     def __init__(self):
         super().__init__('ldlidar_ground_mapper_logger')
         
-        # Declare parameters
+        # Declare parameters - read from shared /** namespace
         self.declare_parameter('scan_topic', '/ldlidar_node/scan')
-        self.declare_parameter('drone_velocity', 1.0)  # m/s in any direction
-        self.declare_parameter('log_output_dir', '~/shahrokhi/logs')
-        self.declare_parameter('log_interval', 0.1)  # Log every 0.1 seconds (10 Hz)
+        self.declare_parameter('drone_velocity', 1.0)
+        self.declare_parameter('lidar.angle_crop_min', 0.0)
+        self.declare_parameter('lidar.angle_crop_max', 360.0)
+        self.declare_parameter('lidar.range_max', 12.0)
         
-        # Get parameters
+        # Node-specific parameters from ground_mapper_logger namespace
+        self.declare_parameter('log_output_dir', '~/shahrokhi/logs')
+        self.declare_parameter('log_interval', 0.1)
+        
+        # Get shared parameters
         scan_topic = self.get_parameter('scan_topic').value
         self.drone_velocity = self.get_parameter('drone_velocity').value
+        self.angle_crop_min = self.get_parameter('lidar.angle_crop_min').value
+        self.angle_crop_max = self.get_parameter('lidar.angle_crop_max').value
+        self.range_max = self.get_parameter('lidar.range_max').value
+        
+        # Get node-specific parameters
         log_output_dir = self.get_parameter('log_output_dir').value
         self.log_interval = self.get_parameter('log_interval').value
         
@@ -111,9 +121,11 @@ class GroundMapperLogger(Node):
                 f.write('-' * 80 + '\n')
                 f.write(f'Angle Range: [{math.degrees(self.scan_params["angle_min"]):.2f}°, '
                        f'{math.degrees(self.scan_params["angle_max"]):.2f}°]\n')
+                f.write(f'Angle Crop: [{self.angle_crop_min:.2f}°, {self.angle_crop_max:.2f}°]\n')
                 f.write(f'Angle Increment: {math.degrees(self.scan_params["angle_increment"]):.4f}°\n')
                 f.write(f'Range Limits: [{self.scan_params["range_min"]:.3f}m, '
                        f'{self.scan_params["range_max"]:.3f}m]\n')
+                f.write(f'Range Max (Config): {self.range_max:.3f}m\n')
                 f.write(f'Scan Time: {self.scan_params["scan_time"]:.4f}s '
                        f'({1.0/self.scan_params["scan_time"]:.1f} Hz)\n')
                 f.write('-' * 80 + '\n\n')
