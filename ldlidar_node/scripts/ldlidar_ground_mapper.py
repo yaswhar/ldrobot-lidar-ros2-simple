@@ -49,6 +49,9 @@ class GroundMapper(Node):
         # Get shared parameters
         scan_topic = self.get_parameter('scan_topic').value
         self.drone_velocity = self.get_parameter('drone_velocity').value
+        self.angle_crop_min = self.get_parameter('lidar.angle_crop_min').value
+        self.angle_crop_max = self.get_parameter('lidar.angle_crop_max').value
+        self.range_max = self.get_parameter('lidar.range_max').value
         
         # Get node-specific parameters
         self.map_buffer_time = self.get_parameter('map_buffer_time').value
