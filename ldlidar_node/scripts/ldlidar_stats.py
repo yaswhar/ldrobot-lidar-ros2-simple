@@ -28,11 +28,11 @@ class LidarStatsPublisher(Node):
         super().__init__('ldlidar_stats_publisher')
         
         # Declare parameters
-        self.declare_parameter('scan_topic', '/ldlidar_node/scan')
+        self.declare_parameter('lidar.scan_topic', '/ldlidar_node/scan')
         self.declare_parameter('update_rate', 1.0)  # Hz, default 1 second
         
         # Get parameters
-        scan_topic = self.get_parameter('scan_topic').value
+        scan_topic = self.get_parameter('lidar.scan_topic').value
         self.update_rate = self.get_parameter('update_rate').value
 
         # Initialize data storage

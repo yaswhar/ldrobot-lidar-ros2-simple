@@ -7,10 +7,20 @@ based on drone velocity, simulating a ground scanner.
 Features:
 - Subscribes to LaserScan data
 - Stacks scans in POLAR coordinates (preserving angle/range format)
+- Adaptive spatial resolution based on drone velocity
+  * Higher velocity → lower spatial resolution (fewer samples per meter)
+  * Lower velocity → higher spatial resolution (more samples per meter)
+  * Constant time resolution (update_rate) maintained
 - Displays like ldlidar_visualizer with accumulating points
 - Real-time scrolling visualization showing scan history
 - Configurable map buffer time
-- Optional map saving functionality
+- Runtime parameter updates supported
+
+Spatial Resolution Logic:
+- target_spatial_resolution = drone_velocity / update_rate
+- Example: 1.0 m/s / 10 Hz = 0.1 m (10 cm between samples)
+- Example: 0.5 m/s / 10 Hz = 0.05 m (5 cm between samples)
+- Example: 2.0 m/s / 10 Hz = 0.2 m (20 cm between samples)
 """
 
 import rclpy
@@ -31,39 +41,68 @@ from datetime import datetime
 
 class GroundMapper(Node):
     def __init__(self):
-        super().__init__('ldlidar_ground_mapper')
+        super().__init__('ground_mapper',
+                        allow_undeclared_parameters=True,
+                        automatically_declare_parameters_from_overrides=True)
         
-        # Declare parameters - read from shared /** namespace
-        self.declare_parameter('scan_topic', '/ldlidar_node/scan')
-        self.declare_parameter('drone_velocity', 1.0)
-        self.declare_parameter('lidar.angle_crop_min', 0.0)
-        self.declare_parameter('lidar.angle_crop_max', 360.0)
-        self.declare_parameter('lidar.range_max', 12.0)
+        # Get shared parameters from lidar namespace in /** 
+        # With automatically_declare_parameters_from_overrides=True, 
+        # parameters from YAML are automatically available
+        scan_topic = self.get_parameter_or('lidar.scan_topic', 
+                                           rclpy.Parameter('lidar.scan_topic', 
+                                                          rclpy.Parameter.Type.STRING, 
+                                                          '/ldlidar_node/scan')).value
+        self.drone_velocity = self.get_parameter_or('lidar.drone_velocity',
+                                                    rclpy.Parameter('lidar.drone_velocity',
+                                                                   rclpy.Parameter.Type.DOUBLE,
+                                                                   1.0)).value
         
-        # Node-specific parameters from ground_mapper namespace
-        self.declare_parameter('map_buffer_time', 120.0)
-        self.declare_parameter('update_rate', 10.0)
-        self.declare_parameter('point_size', 3.0)
-        self.declare_parameter('colormap', 'jet_r')
+        # Get other lidar parameters (nested under lidar: in YAML)
+        self.angle_crop_min = self.get_parameter_or('lidar.angle_crop_min',
+                                                     rclpy.Parameter('lidar.angle_crop_min',
+                                                                    rclpy.Parameter.Type.DOUBLE,
+                                                                    0.0)).value
+        self.angle_crop_max = self.get_parameter_or('lidar.angle_crop_max',
+                                                     rclpy.Parameter('lidar.angle_crop_max',
+                                                                    rclpy.Parameter.Type.DOUBLE,
+                                                                    360.0)).value
+        self.range_max = self.get_parameter_or('lidar.range_max',
+                                               rclpy.Parameter('lidar.range_max',
+                                                              rclpy.Parameter.Type.DOUBLE,
+                                                              12.0)).value
         
-        # Get shared parameters
-        scan_topic = self.get_parameter('scan_topic').value
-        self.drone_velocity = self.get_parameter('drone_velocity').value
-        self.angle_crop_min = self.get_parameter('lidar.angle_crop_min').value
-        self.angle_crop_max = self.get_parameter('lidar.angle_crop_max').value
-        self.range_max = self.get_parameter('lidar.range_max').value
+        # Get node-specific parameters (from ground_mapper: namespace)
+        self.map_buffer_time = self.get_parameter_or('map_buffer_time',
+                                                      rclpy.Parameter('map_buffer_time',
+                                                                     rclpy.Parameter.Type.DOUBLE,
+                                                                     120.0)).value
+        self.update_rate = self.get_parameter_or('update_rate',
+                                                  rclpy.Parameter('update_rate',
+                                                                 rclpy.Parameter.Type.DOUBLE,
+                                                                 10.0)).value
+        self.point_size = self.get_parameter_or('point_size',
+                                                 rclpy.Parameter('point_size',
+                                                                rclpy.Parameter.Type.DOUBLE,
+                                                                3.0)).value
+        self.colormap = self.get_parameter_or('colormap',
+                                               rclpy.Parameter('colormap',
+                                                              rclpy.Parameter.Type.STRING,
+                                                              'jet_r')).value
         
-        # Get node-specific parameters
-        self.map_buffer_time = self.get_parameter('map_buffer_time').value
-        self.update_rate = self.get_parameter('update_rate').value
-        self.point_size = self.get_parameter('point_size').value
-        self.colormap = self.get_parameter('colormap').value
+        # Calculate spatial resolution based on velocity and update rate
+        # Spatial resolution = velocity / update_rate
+        # e.g., 1.0 m/s / 10 Hz = 0.1 m = 10 cm between samples
+        self.target_spatial_resolution = self.drone_velocity / self.update_rate
+        
+        # Set up parameter callback for dynamic updates
+        self.add_on_set_parameters_callback(self.parameter_callback)
         
         # Initialize data storage - store points in polar coordinates
         # Each entry: (timestamp, offset_distance, angles[], ranges[])
         self.scan_buffer = deque()
         self.offset_distance = 0.0  # Current offset distance based on velocity
         self.last_timestamp = None
+        self.last_accepted_scan_timestamp = None  # For decimation tracking
         self.first_scan_received = False
         
         # Scan parameters
@@ -85,8 +124,9 @@ class GroundMapper(Node):
         self.get_logger().info(f'Ground Mapper started')
         self.get_logger().info(f'Subscribing to: {scan_topic}')
         self.get_logger().info(f'Drone velocity: {self.drone_velocity} m/s')
+        self.get_logger().info(f'Target sampling rate: {self.update_rate} Hz')
+        self.get_logger().info(f'Spatial resolution: {self.target_spatial_resolution:.3f} m ({self.target_spatial_resolution*100:.1f} cm)')
         self.get_logger().info(f'Map buffer: {self.map_buffer_time} seconds ({self.map_buffer_time/60:.1f} minutes)')
-        self.get_logger().info(f'Update rate: {self.update_rate} Hz')
         self.get_logger().info(f'Display: Polar coordinates (like visualizer with accumulation)')
         self.get_logger().info('Controls: Right-click drag=pan, Scroll=zoom, Space=pause')
         
@@ -97,7 +137,7 @@ class GroundMapper(Node):
         self.paused = False
         
     def scan_callback(self, msg):
-        """Store scan in polar coordinates with offset based on velocity"""
+        """Store scan in polar coordinates with offset based on velocity and spatial resolution"""
         # Skip if paused
         if self.paused:
             return
@@ -113,6 +153,7 @@ class GroundMapper(Node):
             self.scan_params['range_max'] = msg.range_max
             self.scan_params['scan_time'] = msg.scan_time if msg.scan_time > 0 else 0.1
             self.last_timestamp = current_timestamp
+            self.last_accepted_scan_timestamp = current_timestamp
             self.first_scan_received = True
             
             scan_freq = 1.0 / self.scan_params['scan_time'] if self.scan_params['scan_time'] > 0 else 10.0
@@ -129,12 +170,29 @@ class GroundMapper(Node):
                 f'(center moves outward in this direction as lidar travels)'
             )
         
-        # Calculate time delta and update offset
+        # Calculate time delta and update offset (always track distance)
         if self.last_timestamp is not None:
             delta_t = current_timestamp - self.last_timestamp
             # Calculate distance traveled in scanning direction
             delta_offset = self.drone_velocity * delta_t
             self.offset_distance += delta_offset
+        
+        # Update last timestamp (for distance tracking)
+        self.last_timestamp = current_timestamp
+        
+        # DECIMATION LOGIC: Only accept scan if enough distance has been traveled
+        # This implements constant TIME resolution (update_rate) but variable SPATIAL resolution (based on velocity)
+        if self.last_accepted_scan_timestamp is not None:
+            time_since_last_accepted = current_timestamp - self.last_accepted_scan_timestamp
+            distance_since_last_accepted = self.drone_velocity * time_since_last_accepted
+            
+            # Check if we've traveled enough distance based on target spatial resolution
+            if distance_since_last_accepted < self.target_spatial_resolution:
+                # Skip this scan - haven't traveled far enough yet
+                return
+        
+        # Accept this scan
+        self.last_accepted_scan_timestamp = current_timestamp
         
         # Extract scan data
         num_points = len(msg.ranges)
@@ -149,9 +207,6 @@ class GroundMapper(Node):
         # Store scan with offset (in polar coordinates)
         self.scan_buffer.append((current_timestamp, self.offset_distance, valid_angles, valid_ranges))
         
-        # Update last timestamp
-        self.last_timestamp = current_timestamp
-        
         # Cleanup old scans
         self.cleanup_old_scans(current_timestamp)
         
@@ -160,6 +215,53 @@ class GroundMapper(Node):
         cutoff_time = current_timestamp - self.map_buffer_time
         while self.scan_buffer and self.scan_buffer[0][0] < cutoff_time:
             self.scan_buffer.popleft()
+    
+    def parameter_callback(self, params):
+        """Callback for parameter changes"""
+        from rcl_interfaces.msg import SetParametersResult
+        
+        recalculate_resolution = False
+        
+        for param in params:
+            if param.name == 'lidar.drone_velocity':
+                self.drone_velocity = param.value
+                recalculate_resolution = True
+                self.get_logger().info(f'Updated lidar.drone_velocity to {self.drone_velocity} m/s')
+            elif param.name == 'update_rate':
+                self.update_rate = param.value
+                recalculate_resolution = True
+                self.get_logger().info(f'Updated update_rate to {self.update_rate} Hz')
+            elif param.name == 'lidar.angle_crop_min':
+                self.angle_crop_min = param.value
+                self.get_logger().info(f'Updated angle_crop_min to {self.angle_crop_min}°')
+            elif param.name == 'lidar.angle_crop_max':
+                self.angle_crop_max = param.value
+                self.get_logger().info(f'Updated angle_crop_max to {self.angle_crop_max}°')
+            elif param.name == 'lidar.range_max':
+                self.range_max = param.value
+                self.get_logger().info(f'Updated range_max to {self.range_max} m')
+            elif param.name == 'map_buffer_time':
+                self.map_buffer_time = param.value
+                self.get_logger().info(f'Updated map_buffer_time to {self.map_buffer_time} s')
+            elif param.name == 'point_size':
+                self.point_size = param.value
+                if hasattr(self, 'scatter'):
+                    self.scatter.set_sizes([self.point_size])
+                self.get_logger().info(f'Updated point_size to {self.point_size}')
+            elif param.name == 'colormap':
+                self.colormap = param.value
+                self.get_logger().info(f'Updated colormap to {self.colormap}')
+        
+        # Recalculate spatial resolution if velocity or update_rate changed
+        if recalculate_resolution:
+            self.target_spatial_resolution = self.drone_velocity / self.update_rate
+            self.get_logger().info(
+                f'Recalculated spatial resolution: {self.target_spatial_resolution:.3f} m '
+                f'({self.target_spatial_resolution*100:.1f} cm) based on '
+                f'velocity={self.drone_velocity} m/s and rate={self.update_rate} Hz'
+            )
+        
+        return SetParametersResult(successful=True)
     
     def setup_plot(self):
         """Setup the matplotlib plot for polar visualization (like ldlidar_visualizer)"""
@@ -377,11 +479,19 @@ class GroundMapper(Node):
         total_points = len(all_ranges)
         distance_traveled = self.offset_distance
         
-        # Calculate time span
-        if total_scans > 0:
+        # Calculate time span and actual scan rate
+        if total_scans > 1:
             time_span = self.scan_buffer[-1][0] - self.scan_buffer[0][0]
+            actual_scan_rate = (total_scans - 1) / time_span if time_span > 0 else 0.0
         else:
             time_span = 0.0
+            actual_scan_rate = 0.0
+        
+        # Calculate actual spatial resolution
+        if total_scans > 1 and distance_traveled > 0:
+            actual_spatial_res = distance_traveled / (total_scans - 1)
+        else:
+            actual_spatial_res = self.target_spatial_resolution
         
         # Calculate and display scanning direction
         scan_direction_deg = math.degrees(scan_center_angle)
@@ -389,9 +499,9 @@ class GroundMapper(Node):
         pause_status = " [PAUSED]" if self.paused else ""
         self.title.set_text(
             f'Ground Scanning Map - Accumulating in {scan_direction_deg:.0f}° Direction{pause_status}\n'
-            f'Scans: {total_scans} | Points: {total_points} | '
-            f'Distance: {distance_traveled:.2f}m | Time: {time_span:.1f}s | '
-            f'Velocity: {self.drone_velocity:.2f}m/s'
+            f'Scans: {total_scans} | Points: {total_points} | Distance: {distance_traveled:.2f}m | Time: {time_span:.1f}s\n'
+            f'Velocity: {self.drone_velocity:.2f} m/s | Sample Rate: {actual_scan_rate:.1f} Hz | '
+            f'Spatial Res: {actual_spatial_res*100:.1f} cm (target: {self.target_spatial_resolution*100:.1f} cm)'
         )
         
         return self.scatter,

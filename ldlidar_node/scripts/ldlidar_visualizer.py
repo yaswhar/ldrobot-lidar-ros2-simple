@@ -30,13 +30,13 @@ class LidarVisualizer(Node):
         super().__init__('ldlidar_visualizer')
         
         # Declare parameters
-        self.declare_parameter('scan_topic', '/ldlidar_node/scan')
+        self.declare_parameter('lidar.scan_topic', '/ldlidar_node/scan')
         self.declare_parameter('update_rate', 10.0)  # Hz
         self.declare_parameter('point_size', 5.0)  # Smaller points for better resolution
         self.declare_parameter('colormap', 'jet_r')  # jet_r = red (close) to blue (far)
         
         # Get parameters
-        scan_topic = self.get_parameter('scan_topic').value
+        scan_topic = self.get_parameter('lidar.scan_topic').value
         self.update_rate = self.get_parameter('update_rate').value
         self.point_size = self.get_parameter('point_size').value
         self.colormap = self.get_parameter('colormap').value

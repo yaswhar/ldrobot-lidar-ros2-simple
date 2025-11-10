@@ -26,9 +26,9 @@ class GroundMapperLogger(Node):
     def __init__(self):
         super().__init__('ldlidar_ground_mapper_logger')
         
-        # Declare parameters - read from shared /** namespace
-        self.declare_parameter('scan_topic', '/ldlidar_node/scan')
-        self.declare_parameter('drone_velocity', 1.0)
+        # Declare parameters - read from shared /** namespace (lidar. prefix)
+        self.declare_parameter('lidar.scan_topic', '/ldlidar_node/scan')
+        self.declare_parameter('lidar.drone_velocity', 1.0)
         self.declare_parameter('lidar.angle_crop_min', 0.0)
         self.declare_parameter('lidar.angle_crop_max', 360.0)
         self.declare_parameter('lidar.range_max', 12.0)
@@ -38,8 +38,8 @@ class GroundMapperLogger(Node):
         self.declare_parameter('log_interval', 0.1)
         
         # Get shared parameters
-        scan_topic = self.get_parameter('scan_topic').value
-        self.drone_velocity = self.get_parameter('drone_velocity').value
+        scan_topic = self.get_parameter('lidar.scan_topic').value
+        self.drone_velocity = self.get_parameter('lidar.drone_velocity').value
         self.angle_crop_min = self.get_parameter('lidar.angle_crop_min').value
         self.angle_crop_max = self.get_parameter('lidar.angle_crop_max').value
         self.range_max = self.get_parameter('lidar.range_max').value
@@ -47,6 +47,9 @@ class GroundMapperLogger(Node):
         # Get node-specific parameters
         log_output_dir = self.get_parameter('log_output_dir').value
         self.log_interval = self.get_parameter('log_interval').value
+        
+        # Set up parameter callback for dynamic updates
+        self.add_on_set_parameters_callback(self.parameter_callback)
         
         # Initialize tracking variables
         self.offset_distance = 0.0  # Current offset distance based on velocity
@@ -147,6 +150,29 @@ class GroundMapperLogger(Node):
                 
         except Exception as e:
             self.get_logger().error(f'Failed to write scan parameters: {str(e)}')
+    
+    def parameter_callback(self, params):
+        """Callback for parameter changes"""
+        from rcl_interfaces.msg import SetParametersResult
+        
+        for param in params:
+            if param.name == 'lidar.drone_velocity':
+                self.drone_velocity = param.value
+                self.get_logger().info(f'Updated lidar.drone_velocity to {self.drone_velocity} m/s')
+            elif param.name == 'lidar.angle_crop_min':
+                self.angle_crop_min = param.value
+                self.get_logger().info(f'Updated angle_crop_min to {self.angle_crop_min}°')
+            elif param.name == 'lidar.angle_crop_max':
+                self.angle_crop_max = param.value
+                self.get_logger().info(f'Updated angle_crop_max to {self.angle_crop_max}°')
+            elif param.name == 'lidar.range_max':
+                self.range_max = param.value
+                self.get_logger().info(f'Updated range_max to {self.range_max} m')
+            elif param.name == 'log_interval':
+                self.log_interval = param.value
+                self.get_logger().info(f'Updated log_interval to {self.log_interval} s')
+        
+        return SetParametersResult(successful=True)
     
     def scan_callback(self, msg):
         """Process scan and log data at specified interval"""

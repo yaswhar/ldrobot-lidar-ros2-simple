@@ -50,17 +50,10 @@ def generate_launch_description():
         description='Automatically startup the nav2 stack'
     )
 
-    declare_drone_velocity_cmd = DeclareLaunchArgument(
-        'drone_velocity',
-        default_value='1.0',
-        description='Drone velocity in any direction (m/s)'
-    )
-
     # Launch configuration variables
     params_file_launch = LaunchConfiguration('params_file')
     use_sim_time = LaunchConfiguration('use_sim_time')
     autostart = LaunchConfiguration('autostart')
-    drone_velocity = LaunchConfiguration('drone_velocity')
 
     # Lifecycle manager node
     lifecycle_manager_node = Node(
@@ -117,10 +110,8 @@ def generate_launch_description():
         executable='ldlidar_ground_mapper.py',
         name='ground_mapper',
         output='screen',
-        parameters=[
-            params_file_launch,
-            {'drone_velocity': drone_velocity}
-        ]
+        parameters=[params_file_launch],
+        ros_arguments=['--log-level', 'info']
     )
 
     # Create the launch description
@@ -130,7 +121,6 @@ def generate_launch_description():
     ld.add_action(declare_params_file_cmd)
     ld.add_action(declare_use_sim_time_cmd)
     ld.add_action(declare_autostart_cmd)
-    ld.add_action(declare_drone_velocity_cmd)
 
     # Add nodes
     ld.add_action(log_info)
