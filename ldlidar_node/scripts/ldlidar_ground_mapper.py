@@ -1,26 +1,39 @@
 #!/usr/bin/env python3
 """
-LDLidar Ground Mapper Node
-Generates a 2D topological map by stacking lidar scans in polar coordinates
-based on drone velocity, simulating a ground scanner.
+LDLidar 3D Ground Mapper Node
+Generates a 3D topological map by stacking lidar scans with elevation angle
+based on drone velocity, creating a true 3D representation of the ground.
 
 Features:
 - Subscribes to LaserScan data
-- Stacks scans in POLAR coordinates (preserving angle/range format)
+- Applies pitch/elevation angle to create tilted scan planes
+- Stacks angled scan planes in 3D space along travel direction
 - Adaptive spatial resolution based on drone velocity
   * Higher velocity → lower spatial resolution (fewer samples per meter)
   * Lower velocity → higher spatial resolution (more samples per meter)
   * Constant time resolution (update_rate) maintained
-- Displays like ldlidar_visualizer with accumulating points
-- Real-time scrolling visualization showing scan history
+- Interactive 3D visualization with rotation, zoom, and pan
+- Right-handed coordinate system: X=Forward, Y=Right, Z=Down (nadir)
 - Configurable map buffer time
 - Runtime parameter updates supported
+
+Coordinate System:
+- X-axis: Forward (travel direction component)
+- Y-axis: Right (lateral/sideways)
+- Z-axis: Down/Nadir (positive Z points downward, Z=0 at lidar mount)
 
 Spatial Resolution Logic:
 - target_spatial_resolution = drone_velocity / update_rate
 - Example: 1.0 m/s / 10 Hz = 0.1 m (10 cm between samples)
 - Example: 0.5 m/s / 10 Hz = 0.05 m (5 cm between samples)
 - Example: 2.0 m/s / 10 Hz = 0.2 m (20 cm between samples)
+
+3D Transformation:
+- Elevation angle (α) creates pitch around Y-axis
+- For point at range r, sensor angle θ:
+  * x_world = r·cos(θ)·cos(α) + offset_x
+  * y_world = r·sin(θ) + offset_y
+  * z_world = r·cos(θ)·sin(α) + offset_z
 """
 
 import rclpy
@@ -33,6 +46,7 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
+from mpl_toolkits.mplot3d import Axes3D
 import math
 from collections import deque
 import os
@@ -70,6 +84,11 @@ class GroundMapper(Node):
                                                rclpy.Parameter('lidar.range_max',
                                                               rclpy.Parameter.Type.DOUBLE,
                                                               12.0)).value
+        self.elevation_angle = self.get_parameter_or('lidar.elevation_angle',
+                                                      rclpy.Parameter('lidar.elevation_angle',
+                                                                     rclpy.Parameter.Type.DOUBLE,
+                                                                     -30.0)).value
+        self.elevation_angle_rad = np.radians(self.elevation_angle)
         
         # Get node-specific parameters (from ground_mapper: namespace)
         self.map_buffer_time = self.get_parameter_or('map_buffer_time',
@@ -124,11 +143,12 @@ class GroundMapper(Node):
         self.get_logger().info(f'Ground Mapper started')
         self.get_logger().info(f'Subscribing to: {scan_topic}')
         self.get_logger().info(f'Drone velocity: {self.drone_velocity} m/s')
+        self.get_logger().info(f'Elevation angle: {self.elevation_angle}° (pitch)')
         self.get_logger().info(f'Target sampling rate: {self.update_rate} Hz')
         self.get_logger().info(f'Spatial resolution: {self.target_spatial_resolution:.3f} m ({self.target_spatial_resolution*100:.1f} cm)')
         self.get_logger().info(f'Map buffer: {self.map_buffer_time} seconds ({self.map_buffer_time/60:.1f} minutes)')
-        self.get_logger().info(f'Display: Polar coordinates (like visualizer with accumulation)')
-        self.get_logger().info('Controls: Right-click drag=pan, Scroll=zoom, Space=pause')
+        self.get_logger().info(f'Display: 3D coordinates (X=Forward, Y=Right, Z=Down/Nadir)')
+        self.get_logger().info('Controls: Left-drag=rotate, Right-drag/Scroll=zoom, Middle-drag=pan, Space=pause')
         
         # Setup matplotlib figure
         self.setup_plot()
@@ -240,6 +260,10 @@ class GroundMapper(Node):
             elif param.name == 'lidar.range_max':
                 self.range_max = param.value
                 self.get_logger().info(f'Updated range_max to {self.range_max} m')
+            elif param.name == 'lidar.elevation_angle':
+                self.elevation_angle = param.value
+                self.elevation_angle_rad = np.radians(self.elevation_angle)
+                self.get_logger().info(f'Updated elevation_angle to {self.elevation_angle}° (pitch)')
             elif param.name == 'map_buffer_time':
                 self.map_buffer_time = param.value
                 self.get_logger().info(f'Updated map_buffer_time to {self.map_buffer_time} s')
@@ -264,13 +288,13 @@ class GroundMapper(Node):
         return SetParametersResult(successful=True)
     
     def setup_plot(self):
-        """Setup the matplotlib plot for polar visualization (like ldlidar_visualizer)"""
-        # Create figure with smaller size
-        self.fig = plt.figure(figsize=(10, 8))
-        self.ax = self.fig.add_subplot(111)
+        """Setup the matplotlib plot for 3D visualization"""
+        # Create figure for 3D display
+        self.fig = plt.figure(figsize=(12, 10))
+        self.ax = self.fig.add_subplot(111, projection='3d')
         
-        # Set equal aspect ratio for proper circular display
-        self.ax.set_aspect('equal', adjustable='box')
+        # Set initial isometric view
+        self.ax.view_init(elev=30, azim=45)
         
         # Use tight layout
         self.fig.tight_layout(pad=2.0)
@@ -278,46 +302,38 @@ class GroundMapper(Node):
         # Pause state
         self.paused = False
         
-        # Initial plot limits (will be updated when first scan arrives)
-        max_range = 12.0 * 1.05
+        # Initial plot limits (will be updated dynamically)
+        max_range = self.range_max * 1.05
         self.ax.set_xlim(-max_range, max_range)
         self.ax.set_ylim(-max_range, max_range)
+        self.ax.set_zlim(-max_range, max_range)
         
-        # Setup colormap for range visualization (same as visualizer)
-        self.norm = Normalize(vmin=0, vmax=12.0)
+        # Setup colormap for range visualization
+        self.norm = Normalize(vmin=0, vmax=self.range_max)
         self.cmap = plt.get_cmap(self.colormap)
         self.sm = ScalarMappable(norm=self.norm, cmap=self.cmap)
         
         # Add colorbar
-        self.cbar = plt.colorbar(self.sm, ax=self.ax, pad=0.05, shrink=0.9)
+        self.cbar = plt.colorbar(self.sm, ax=self.ax, pad=0.1, shrink=0.8)
         self.cbar.set_label('Range (m)', rotation=270, labelpad=20)
         
-        # Initialize scatter plot
-        self.scatter = self.ax.scatter([], [], c=[], s=self.point_size,
+        # Initialize 3D scatter plot
+        self.scatter = self.ax.scatter([], [], [], c=[], s=self.point_size,
                                        cmap=self.cmap, norm=self.norm,
-                                       alpha=0.6, edgecolors='none')
+                                       alpha=0.6, edgecolors='none',
+                                       depthshade=True)
         
         # Labels and title
-        self.ax.set_xlabel('X Position (m)', fontsize=12)
-        self.ax.set_ylabel('Y Position (m)', fontsize=12)
+        self.ax.set_xlabel('X - Forward [m]', fontsize=12, labelpad=10)
+        self.ax.set_ylabel('Y - Right [m]', fontsize=12, labelpad=10)
+        self.ax.set_zlabel('Z - Down/Nadir [m]', fontsize=12, labelpad=10)
         self.title = self.ax.set_title(
-            'Ground Scanning Topological Map (Polar View)\nWaiting for data...',
-            pad=10, fontsize=12, fontweight='bold'
+            '3D Ground Scanning Topological Map\nWaiting for data...',
+            pad=20, fontsize=12, fontweight='bold'
         )
         
-        # Draw polar grid
-        self.draw_polar_grid(max_range)
-        
-        # Enable interactive features
-        self.fig.canvas.mpl_connect('scroll_event', self.on_scroll)
-        self.fig.canvas.mpl_connect('button_press_event', self.on_click)
-        self.fig.canvas.mpl_connect('button_release_event', self.on_release)
-        self.fig.canvas.mpl_connect('motion_notify_event', self.on_motion)
+        # Enable interactive features (3D has built-in rotation, zoom, pan)
         self.fig.canvas.mpl_connect('key_press_event', self.on_key_press)
-        
-        # Pan state
-        self.panning = False
-        self.pan_start = None
         
         # Add pause button
         from matplotlib.widgets import Button
@@ -325,52 +341,8 @@ class GroundMapper(Node):
         self.pause_btn = Button(pause_ax, 'Pause')
         self.pause_btn.on_clicked(self.toggle_pause)
     
-    def draw_polar_grid(self, max_range):
-        """Draw polar grid lines (circles and radial lines) - same as visualizer"""
-        # Draw concentric circles
-        num_circles = 6
-        for i in range(1, num_circles + 1):
-            r = (max_range / num_circles) * i
-            circle = plt.Circle((0, 0), r, fill=False, color='gray',
-                               alpha=0.3, linewidth=0.5, linestyle='--')
-            self.ax.add_patch(circle)
-            # Add range labels
-            self.ax.text(0, r, f'{r:.1f}m', ha='center', va='bottom',
-                        fontsize=8, color='gray', alpha=0.7)
-        
-        # Draw radial lines within sensor angle range
-        # Transform: rotate by 90° so 0° is at top, negate X for clockwise
-        angle_min_deg = math.degrees(self.scan_params['angle_min'])
-        angle_max_deg = math.degrees(self.scan_params['angle_max'])
-        
-        # Draw radial lines every 30 degrees
-        start_angle = int(np.ceil(angle_min_deg / 30.0)) * 30
-        sensor_angle_deg = start_angle
-        while sensor_angle_deg <= angle_max_deg:
-            display_angle_rad = np.radians(90 - sensor_angle_deg)
-            x = [0, max_range * np.cos(display_angle_rad)]
-            y = [0, max_range * np.sin(display_angle_rad)]
-            self.ax.plot(x, y, color='gray', alpha=0.3, linewidth=0.5, linestyle='--')
-            # Add angle labels
-            label_r = max_range * 1.05
-            label_x = label_r * np.cos(display_angle_rad)
-            label_y = label_r * np.sin(display_angle_rad)
-            self.ax.text(label_x, label_y, f'{sensor_angle_deg:.0f}°', ha='center', va='center',
-                        fontsize=8, color='gray', alpha=0.7)
-            sensor_angle_deg += 30
-        
-        # Draw boundary lines at exact min/max angles
-        for boundary_angle_deg in [angle_min_deg, angle_max_deg]:
-            display_angle_rad = np.radians(90 - boundary_angle_deg)
-            x = [0, max_range * np.cos(display_angle_rad)]
-            y = [0, max_range * np.sin(display_angle_rad)]
-            self.ax.plot(x, y, color='red', alpha=0.5, linewidth=1.0, linestyle='-')
-        
-        # Draw origin marker
-        self.ax.plot(0, 0, 'k+', markersize=10, markeredgewidth=2)
-        
     def update_plot(self, frame):
-        """Update the plot with all accumulated scans in polar view"""
+        """Update the plot with all accumulated scans in 3D view"""
         if not self.first_scan_received or not self.scan_buffer:
             return self.scatter,
         
@@ -379,10 +351,16 @@ class GroundMapper(Node):
         # Transform to display coordinates (90° rotation, negate for clockwise)
         scanning_direction_rad = np.pi/2 - scan_center_angle
         
+        # Elevation angle for pitch rotation
+        alpha = self.elevation_angle_rad
+        cos_alpha = np.cos(alpha)
+        sin_alpha = np.sin(alpha)
+        
         # Collect all points from all scans in buffer
         # Create a snapshot of the buffer to avoid mutation during iteration
         all_x = []
         all_y = []
+        all_z = []
         all_ranges = []
         
         scan_buffer_snapshot = list(self.scan_buffer)  # Create a copy
@@ -391,22 +369,35 @@ class GroundMapper(Node):
             if len(ranges) == 0:
                 continue
             
-            # Convert polar to cartesian with same transform as visualizer
+            # Convert polar to 2D cartesian (sensor's scanning plane)
             # Rotate by 90° so sensor 0° appears at top, negate X for clockwise
             adjusted_angles = np.pi/2 - angles
-            x = ranges * np.cos(adjusted_angles)
-            y = ranges * np.sin(adjusted_angles)
+            x_2d = ranges * np.cos(adjusted_angles)
+            y_2d = ranges * np.sin(adjusted_angles)
             
-            # Apply offset in the scanning direction
-            # Move the center of polar coordinates outward in scanning direction
-            offset_x = offset * np.cos(scanning_direction_rad)
-            offset_y = offset * np.sin(scanning_direction_rad)
+            # Apply pitch rotation around Y-axis (elevation angle)
+            # The scan plane is tilted, but the lidar itself moves horizontally
+            # For negative elevation (nose-down): points below lidar have POSITIVE Z
+            # For positive elevation (nose-up): points above lidar have NEGATIVE Z
+            # x_2d represents the forward component in sensor's tilted frame
+            x_world = x_2d * cos_alpha  # Horizontal forward component
+            y_world = y_2d  # Lateral component unchanged
+            z_world = -x_2d * sin_alpha  # NEGATIVE sign: downward is positive Z
             
-            x = x + offset_x
-            y = y + offset_y
+            # Calculate offset for lidar movement (positive X direction only)
+            # The lidar moves forward in +X direction in world coordinates
+            offset_x = offset  # Direct forward movement in +X
+            offset_y = 0.0     # No lateral movement
+            offset_z = 0.0     # No vertical movement - lidar stays at constant height
+            
+            # Apply offset
+            x = x_world + offset_x
+            y = y_world + offset_y
+            z = z_world + offset_z
             
             all_x.extend(x)
             all_y.extend(y)
+            all_z.extend(z)
             all_ranges.extend(ranges)
         
         if not all_x:
@@ -415,55 +406,41 @@ class GroundMapper(Node):
         # Convert to numpy arrays
         all_x = np.array(all_x)
         all_y = np.array(all_y)
+        all_z = np.array(all_z)
         all_ranges = np.array(all_ranges)
         
-        # Update scatter plot
-        self.scatter.set_offsets(np.c_[all_x, all_y])
+        # Update 3D scatter plot using _offsets3d
+        self.scatter._offsets3d = (all_x, all_y, all_z)
         self.scatter.set_array(all_ranges)
         
-        # Calculate the chord length for y-axis based on angle crop range
-        # Use configured angle crop parameters from YAML
-        angle_crop_min_rad = np.radians(self.angle_crop_min)
-        angle_crop_max_rad = np.radians(self.angle_crop_max)
-        angle_span = angle_crop_max_rad - angle_crop_min_rad
-        max_range = self.range_max
-        # Chord length = 2 * R * sin(angle_span / 2)
-        # Use 1.2 times the max_range for the effective radius
-        effective_radius = max_range * 1.2
-        chord_length = 2 * effective_radius * np.sin(angle_span / 2)
-        
-        # Auto-adjust plot limits to follow the lidar (only if not paused)
-        # When paused, user can manually pan to see historical data
+        # Auto-adjust 3D plot limits based on data (only if not paused)
+        # When paused, user can manually interact with the 3D view
         if len(all_x) > 0 and not self.paused:
             margin = 0.1  # 10% margin
             
-            # Get the extent of current data
+            # Calculate data extents for all three axes
             x_min, x_max = np.min(all_x), np.max(all_x)
             y_min, y_max = np.min(all_y), np.max(all_y)
+            z_min, z_max = np.min(all_z), np.max(all_z)
             
-            # Window dimensions based on specifications:
-            # Height: 1.2 times the chord length
-            # Width: 2 times the height
-            window_height = chord_length * 1.2
-            window_width = window_height * 2.0
+            # Calculate ranges
+            x_range = x_max - x_min if x_max > x_min else self.range_max
+            y_range = y_max - y_min if y_max > y_min else self.range_max
+            z_range = z_max - z_min if z_max > z_min else self.range_max
             
-            # Center the view on the CURRENT lidar position (latest offset)
-            # This ensures the window follows the lidar in real-time
-            # Calculate current lidar center position based on offset and scanning direction
-            current_lidar_x = self.offset_distance * np.cos(scanning_direction_rad)
-            current_lidar_y = self.offset_distance * np.sin(scanning_direction_rad)
+            # Add margin to each axis
+            x_margin = x_range * margin
+            y_margin = y_range * margin
+            z_margin = z_range * margin
             
-            # Use the current lidar position as the view center for both axes
-            view_center_x = current_lidar_x
-            view_center_y = current_lidar_y
+            # Center Y-axis around zero by making limits symmetric
+            y_center = (y_min + y_max) / 2
+            y_half_range = max(abs(y_min - y_center), abs(y_max - y_center)) + y_margin
             
-            # Add margin
-            x_margin = window_width * margin
-            y_margin = window_height * margin
-            
-            # Set limits with the lidar-centered view
-            self.ax.set_xlim(view_center_x - window_width/2 - x_margin, view_center_x + window_width/2 + x_margin)
-            self.ax.set_ylim(view_center_y - window_height/2 - y_margin, view_center_y + window_height/2 + y_margin)
+            # Set adaptive limits (Y-axis centered, Z allows negative values)
+            self.ax.set_xlim(x_min - x_margin, x_max + x_margin)
+            self.ax.set_ylim(y_center - y_half_range, y_center + y_half_range)
+            self.ax.set_zlim(z_min - z_margin, z_max + z_margin)
         
         # Update normalization range
         if len(all_ranges) > 0:
@@ -498,7 +475,7 @@ class GroundMapper(Node):
         
         pause_status = " [PAUSED]" if self.paused else ""
         self.title.set_text(
-            f'Ground Scanning Map - Accumulating in {scan_direction_deg:.0f}° Direction{pause_status}\n'
+            f'3D Ground Scanning Map - Pitch: {self.elevation_angle:.1f}° | Scanning: {scan_direction_deg:.0f}°{pause_status}\n'
             f'Scans: {total_scans} | Points: {total_points} | Distance: {distance_traveled:.2f}m | Time: {time_span:.1f}s\n'
             f'Velocity: {self.drone_velocity:.2f} m/s | Sample Rate: {actual_scan_rate:.1f} Hz | '
             f'Spatial Res: {actual_spatial_res*100:.1f} cm (target: {self.target_spatial_resolution*100:.1f} cm)'
@@ -521,87 +498,6 @@ class GroundMapper(Node):
         """Handle keyboard shortcuts"""
         if event.key == ' ':  # Space bar to toggle pause
             self.toggle_pause()
-    
-    def on_scroll(self, event):
-        """Handle zoom with scroll wheel"""
-        if event.inaxes != self.ax:
-            return
-        
-        # Get current limits
-        x_min, x_max = self.ax.get_xlim()
-        y_min, y_max = self.ax.get_ylim()
-        
-        # Zoom factor
-        zoom_factor = 1.2 if event.button == 'down' else 0.8
-        
-        # Calculate new limits centered on mouse position or current center
-        if event.xdata is not None and event.ydata is not None:
-            x_center = event.xdata
-            y_center = event.ydata
-        else:
-            x_center = (x_min + x_max) / 2
-            y_center = (y_min + y_max) / 2
-        
-        x_range = (x_max - x_min) / 2
-        y_range = (y_max - y_min) / 2
-        
-        new_x_range = x_range * zoom_factor
-        new_y_range = y_range * zoom_factor
-        
-        # Don't zoom out beyond original limits
-        max_range = self.scan_params['range_max'] * 1.05
-        if new_x_range > max_range:
-            new_x_range = max_range
-        if new_y_range > max_range:
-            new_y_range = max_range
-        
-        # Don't zoom in too much
-        if new_x_range < 0.5:
-            new_x_range = 0.5
-        if new_y_range < 0.5:
-            new_y_range = 0.5
-        
-        self.ax.set_xlim(x_center - new_x_range, x_center + new_x_range)
-        self.ax.set_ylim(y_center - new_y_range, y_center + new_y_range)
-        self.fig.canvas.draw_idle()
-    
-    def on_click(self, event):
-        """Handle click events - right click starts panning"""
-        if event.inaxes != self.ax:
-            return
-        
-        # Right click - start panning
-        if event.button == 3:
-            self.panning = True
-            self.pan_start = (event.xdata, event.ydata)
-    
-    def on_release(self, event):
-        """Handle button release - stop panning"""
-        if event.button == 3:
-            self.panning = False
-            self.pan_start = None
-    
-    def on_motion(self, event):
-        """Handle mouse motion for panning"""
-        if not self.panning or self.pan_start is None or event.inaxes != self.ax:
-            return
-        
-        # Calculate the difference
-        dx = event.xdata - self.pan_start[0]
-        dy = event.ydata - self.pan_start[1]
-        
-        # Get current limits
-        x_min, x_max = self.ax.get_xlim()
-        y_min, y_max = self.ax.get_ylim()
-        
-        # Update limits
-        self.ax.set_xlim(x_min - dx, x_max - dx)
-        self.ax.set_ylim(y_min - dy, y_max - dy)
-        
-        # Update pan start
-        self.pan_start = (event.xdata - dx, event.ydata - dy)
-        
-        self.fig.canvas.draw_idle()
     
     def run(self):
         """Run the visualization"""

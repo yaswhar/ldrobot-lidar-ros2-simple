@@ -22,11 +22,12 @@
       angle_crop_min: 240.0 # minimum angle for cropping
       angle_crop_max: 300.0 # maximum angle for cropping
       scan_topic: '/ldlidar_node/scan' # Topic to subscribe for laser scan data
-      drone_velocity: 1.0 # Drone velocity in meters per second (m/s) - controls spatial resolution
+      drone_velocity: 0.2 # Drone velocity in meters per second (m/s) - controls spatial resolution
+      elevation_angle: -30.0 # Pitch angle in degrees (negative=nose-down for ground scanning, positive=nose-up)
 
 ldlidar_stats_publisher:
   ros__parameters:
-    update_rate: 1.0 # Statistics computation rate in Hz (1.0 = every second)
+    update_rate: 10.0 # Statistics computation rate in Hz (1.0 = every second)
 
 ldlidar_stats_logger:
   ros__parameters:
@@ -35,12 +36,12 @@ ldlidar_stats_logger:
 
 ground_mapper:
   ros__parameters:
-    map_buffer_time: 120.0 # Seconds of scan data to keep in buffer
-    update_rate: 1.0 # Visualization update rate (Hz)
+    map_buffer_time: 30.0 # Seconds of scan data to keep in buffer
+    update_rate: 10.0 # Visualization update rate (Hz)
     point_size: 3.0 # Point size for scatter plot visualization
     colormap: 'jet_r' # Matplotlib colormap (jet_r, viridis, hot, cool)
 
 ground_mapper_logger:
   ros__parameters:
     log_output_dir: '~/shahrokhi/ground_logs' # Directory to save log files
-    log_interval: 1.0 # Log interval in seconds (10 Hz)
+    log_interval: 0.1 # Log interval in seconds (10 Hz)
