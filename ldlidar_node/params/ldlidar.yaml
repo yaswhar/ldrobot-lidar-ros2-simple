@@ -23,7 +23,7 @@
       angle_crop_max: 300.0 # maximum angle for cropping
       scan_topic: '/ldlidar_node/scan' # Topic to subscribe for laser scan data
       drone_velocity: 0.2 # Drone velocity in meters per second (m/s) - controls spatial resolution
-      elevation_angle: -30.0 # Pitch angle in degrees (negative=nose-down for ground scanning, positive=nose-up)
+      elevation_angle: 0.0 # Pitch angle in degrees (negative=nose-down for ground scanning, positive=nose-up)
 
 ldlidar_stats_publisher:
   ros__parameters:

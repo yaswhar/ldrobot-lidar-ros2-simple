@@ -324,9 +324,9 @@ class GroundMapper(Node):
                                        depthshade=True)
         
         # Labels and title
-        self.ax.set_xlabel('X - Forward [m]', fontsize=12, labelpad=10)
-        self.ax.set_ylabel('Y - Right [m]', fontsize=12, labelpad=10)
-        self.ax.set_zlabel('Z - Down/Nadir [m]', fontsize=12, labelpad=10)
+        self.ax.set_xlabel('X [m]', fontsize=12, labelpad=10)
+        self.ax.set_ylabel('Y [m]', fontsize=12, labelpad=10)
+        self.ax.set_zlabel('Z [m]', fontsize=12, labelpad=10)
         self.title = self.ax.set_title(
             '3D Ground Scanning Topological Map\nWaiting for data...',
             pad=20, fontsize=12, fontweight='bold'
@@ -347,12 +347,14 @@ class GroundMapper(Node):
             return self.scatter,
         
         # Calculate scanning direction (middle of the scanning arc)
+        # This direction becomes the world +X axis (forward direction)
         scan_center_angle = (self.scan_params['angle_min'] + self.scan_params['angle_max']) / 2.0
-        # Transform to display coordinates (90° rotation, negate for clockwise)
-        scanning_direction_rad = np.pi/2 - scan_center_angle
         
-        # Elevation angle for pitch rotation
-        alpha = self.elevation_angle_rad
+        # Elevation angle for pitch rotation with 90° shift
+        # User's 0° = pointing straight down (vertical)
+        # User's -90° = horizontal (parallel to XY-plane)
+        # Add 90° shift to convert user's angle to calculation angle
+        alpha = self.elevation_angle_rad + np.pi/2
         cos_alpha = np.cos(alpha)
         sin_alpha = np.sin(alpha)
         
@@ -369,26 +371,39 @@ class GroundMapper(Node):
             if len(ranges) == 0:
                 continue
             
-            # Convert polar to 2D cartesian (sensor's scanning plane)
-            # Rotate by 90° so sensor 0° appears at top, negate X for clockwise
-            adjusted_angles = np.pi/2 - angles
-            x_2d = ranges * np.cos(adjusted_angles)
-            y_2d = ranges * np.sin(adjusted_angles)
+            # Convert polar to 2D cartesian in sensor frame
+            # Angles are relative to sensor's 0° reference
+            x_sensor = ranges * np.cos(angles)
+            y_sensor = ranges * np.sin(angles)
             
-            # Apply pitch rotation around Y-axis (elevation angle)
-            # The scan plane is tilted, but the lidar itself moves horizontally
-            # For negative elevation (nose-down): points below lidar have POSITIVE Z
-            # For positive elevation (nose-up): points above lidar have NEGATIVE Z
-            # x_2d represents the forward component in sensor's tilted frame
-            x_world = x_2d * cos_alpha  # Horizontal forward component
-            y_world = y_2d  # Lateral component unchanged
-            z_world = -x_2d * sin_alpha  # NEGATIVE sign: downward is positive Z
+            # Rotate to align scanning center direction with world +X axis
+            # Subtract scan_center_angle to make that direction become 0° (pointing in +X)
+            rotation_angle = scan_center_angle
+            cos_rot = np.cos(rotation_angle)
+            sin_rot = np.sin(rotation_angle)
             
-            # Calculate offset for lidar movement (positive X direction only)
-            # The lidar moves forward in +X direction in world coordinates
-            offset_x = offset  # Direct forward movement in +X
-            offset_y = 0.0     # No lateral movement
-            offset_z = 0.0     # No vertical movement - lidar stays at constant height
+            # Apply rotation in XY plane
+            x_rotated = x_sensor * cos_rot - y_sensor * sin_rot
+            y_rotated = x_sensor * sin_rot + y_sensor * cos_rot
+            
+            # Now apply elevation angle (pitch around Y-axis)
+            # x_rotated is the forward component, which gets pitched down/up
+            x_world = x_rotated * cos_alpha  # Horizontal component
+            y_world = y_rotated  # Lateral component unchanged
+            # Z convention with shifted angle:
+            # If -180° < elevation_angle < -90°: alpha < 0, so Z is negative (below)
+            # If -90° < elevation_angle < 0°: alpha > 0 but sin(alpha) > 0 initially, then negative
+            # If 0° < elevation_angle < 180°: Z is positive (above)
+            # Since alpha = elevation_angle + 90°:
+            # For elevation_angle in (-180, -90): alpha in (-90, 0), sin(alpha) < 0, need positive for negative Z
+            # For elevation_angle in (0, 180): alpha in (90, 270), sin(alpha) can be +/-, need to map correctly
+            z_world = x_rotated * sin_alpha  # Positive when pointing down (alpha between 90-180)
+            
+            # Calculate offset for lidar movement in +X direction (scanning direction)
+            # Lidar moves horizontally in +X world direction
+            offset_x = offset
+            offset_y = 0.0
+            offset_z = 0.0
             
             # Apply offset
             x = x_world + offset_x
