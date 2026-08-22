@@ -1,0 +1,74 @@
+# ldlidar_node/params/dynamixel_actuator.yaml
+#
+# HARDWARE-LAYER config for dynamixel_actuator_node.
+# Owns: port, baud, logical->physical motor mapping (id/direction), soft limits,
+# current limits. Calibration zero lives in each motor's EEPROM Homing Offset
+# (set by dynamixel_calibrate.py), NOT here. NOTHING mechanism-specific here.
+
+/**:
+  ros__parameters:
+    # --- serial link (prefer a stable /dev/serial/by-id/... path so it does
+    #     not collide with the LIDAR's /dev/ttyUSB0 on the same Pi) ---
+    port: '/dev/ttyUSB0'
+    baudrate: 1000000        # FIXED: all 4 servos are at 1M (bench-measured)
+    protocol_version: 2.0    # DYNAMIXEL Protocol 2.0 (TTL)
+    auto_probe_baud: false   # connect directly at 1M; no multi-baud probe on
+                             # launch. Use `find_servos.py --scan` to diagnose.
+
+    # --- logical joint -> physical motor mapping ---
+    # "theta" is TWO motors (IDs 1 & 2); alpha/beta are single motors. All four
+    # resolve to the SAME direction (-1): raw ticks DECREASE as the physical
+    # angle increases. Per-motor zero is handled by EEPROM Homing Offset, so the
+    # two theta motors receive IDENTICAL goal ticks after calibration.
+    # raw_offsets_ticks are the bench-measured raw ticks at physical 0 deg and
+    # are used ONLY for the startup sanity log (runtime zero = Homing Offset).
+    motors:
+      theta:
+        ids: [1, 2]
+        directions: [-1, -1]
+        raw_offsets_ticks: [2048, 618]   # reference only (startup log)
+      alpha:
+        ids: [3]
+        directions: [-1]
+        raw_offsets_ticks: [1024]        # reference only (startup log)
+      beta:
+        ids: [4]
+        directions: [-1]
+        raw_offsets_ticks: [3072]        # reference only (startup log)
+
+    # --- per-logical-joint soft angle limits (deg) -- SAFETY BACKSTOP ---
+    # Enforced on EVERY goal regardless of what a (future lidar) planner asks.
+    # Kept slightly wider than the kinematic range so the real trajectory
+    # (theta end ~5.6 deg, alpha end ~1.9 deg) is not clamped.
+    limits:
+      theta: {min_deg: 0.0, max_deg: 80.0}
+      alpha: {min_deg: 0.0, max_deg: 85.0}
+      beta:  {min_deg: 0.0, max_deg: 80.0}
+
+    # --- kinematic operating range per joint (startup sanity log ONLY) ---
+    # Reproduces the bench-measured tick ranges the operator eyeballs before
+    # power: ID1 1974->1214, ID2 544->-216, ID3 1002->84, ID4 2980->2318.
+    sanity_range_deg:
+      theta: [6.5, 73.3]
+      alpha: [1.9, 82.6]
+      beta:  [8.1, 66.3]
+
+    # --- motion profiles (firmware trapezoidal profile) ---
+    default_profile_velocity_rad_s: 0.6   # used when a goal omits velocity
+    profile_acceleration_rad_s2: 3.0
+    creep_profile_velocity_rad_s: 0.15    # slow "creep to first pose" speed
+
+    # --- independent current-based cutoff (second line of defence) ---
+    current_limit_ma: 1200.0              # torque-disable above this (rated 1.3 A)
+    current_fault_persist: 5              # consecutive over-limit reads to trip
+
+    # --- calibration (used by dynamixel_calibrate.py; the actuator node ignores
+    #     these -- runtime zero lives in each motor's EEPROM Homing Offset) ---
+    calibration:
+      reference_deg: {theta: 0.0, alpha: 0.0, beta: 0.0}  # physical-zero pose
+      offsets_file: '~/dynamixel_offsets.yaml'            # record output path
+
+    # --- timing / topics ---
+    state_publish_rate_hz: 20.0
+    goal_topic: '/joint_goal'
+    state_topic: '/joint_states'

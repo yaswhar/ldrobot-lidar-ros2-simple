@@ -84,6 +84,17 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# Install DYNAMIXEL platform nodes + utilities (decoupled from the lidar code).
+# Two nodes (actuator hardware-layer + oscillation planner) plus discovery and
+# calibration CLIs. See ldlidar_node/dynamixel/README.md.
+install(PROGRAMS
+  dynamixel/dynamixel_actuator_node.py
+  dynamixel/oscillation_planner_node.py
+  dynamixel/find_servos.py
+  dynamixel/dynamixel_calibrate.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 # Testing
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

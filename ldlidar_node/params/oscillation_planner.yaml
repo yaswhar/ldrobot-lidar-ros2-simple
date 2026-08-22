@@ -1,0 +1,44 @@
+# ldlidar_node/params/oscillation_planner.yaml
+#
+# MOTION-PLANNING config for oscillation_planner_node.
+# Owns: mechanism geometry, trajectory, per-mode cycle times, torque model.
+# NOTHING about DynamixelSDK / motor IDs / ticks lives here.
+
+/**:
+  ros__parameters:
+    mode: 2                 # 1=slow(6.0s) 2=normal(4.5s) 3=fast(3.0s); overridden
+                            # by the launch 'mode' argument.
+    repeat: 1               # number of full round trips per invocation
+
+    # --- mechanism geometry (baseline design point, metres) ---
+    geometry:
+      a: 0.11
+      b: 0.44
+      c: 0.77
+      d: 0.10
+
+    # --- oscillation trajectory (the validated reference case) ---
+    trajectory:
+      h_start: 1.18         # m  (start limit, high)
+      h_end: 0.68           # m  (end limit, low)
+      gamma_start_deg: 30.0 # tilt at start
+      gamma_end_deg: -30.0  # tilt at end
+
+    # --- per-mode LEG (one-way / half-cycle) time [s] ---
+    # NOTE: T is the one-way sweep duration (reproduces the reference peak
+    # speeds). A full round trip is 2*T. Fastest (mode 3) == validated baseline.
+    mode_times:
+      mode1_s: 6.0          # slow
+      mode2_s: 4.5          # normal
+      mode3_s: 3.0          # fast (== reference case)
+
+    # --- torque / feasibility model ---
+    gear_ratio: 1.0                 # motor:joint reduction (1.0 = direct drive)
+    gravity_torque_fraction: 0.5    # fraction of the anchored 1.07 N.m peak that
+                                    # is gravity (T-independent); the rest scales
+                                    # as 1/T^2. Conservative default; tune if a
+                                    # dynamic model is available.
+
+    # --- arrival detection ---
+    arrival_tolerance_deg: 1.5
+    start_settle_s: 3.0             # extra time for the creep-to-start move

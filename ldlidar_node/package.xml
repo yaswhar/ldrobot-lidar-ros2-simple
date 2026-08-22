@@ -23,6 +23,12 @@
   <exec_depend>python3-matplotlib</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
 
+  <!-- Dependencies for the DYNAMIXEL platform nodes (dynamixel/ subfolder) -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>dynamixel_sdk</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+
   <test_depend>ament_cmake_pytest</test_depend>
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

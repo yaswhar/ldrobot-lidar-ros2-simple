@@ -1,0 +1,34 @@
+# docker/Dockerfile.dynamixel
+#
+# Adds DynamixelSDK (Python) to the existing ros2_lidar_image so the two
+# DYNAMIXEL platform nodes can run on the Raspberry Pi.
+#
+# The base image ALREADY contains ROS2 Humble + the built ldlidar workspace.
+# This layer only adds the servo SDK; you then rebuild the ROS workspace so the
+# new nodes are installed.
+#
+# Build (on a machine that has the base image), then commit/push so it reaches
+# the Pi -- see docker/README.md:
+#
+#   docker build -f docker/Dockerfile.dynamixel -t ros2_lidar_image:dynamixel .
+#
+# (or tag it back as ros2_lidar_image to keep the run scripts unchanged:)
+#
+#   docker build -f docker/Dockerfile.dynamixel -t ros2_lidar_image .
+
+FROM ros2_lidar_image
+
+# Prefer the ROS2 package (matches the rosdep key 'dynamixel_sdk'); fall back to
+# pip if the apt package is unavailable in the image's sources.
+RUN apt-get update \
+ && (apt-get install -y --no-install-recommends ros-humble-dynamixel-sdk python3-yaml \
+     || pip3 install --no-cache-dir dynamixel-sdk pyyaml) \
+ && rm -rf /var/lib/apt/lists/*
+
+# Rebuild the workspace so dynamixel_actuator_node.py / oscillation_planner_node.py
+# and their launch/params are installed. Adjust the workspace path if different.
+RUN bash -lc "source /opt/ros/humble/setup.bash \
+ && cd /root/ros2_ws \
+ && colcon build --packages-select ldlidar_component ldlidar_node \
+      --symlink-install --cmake-args=-DCMAKE_BUILD_TYPE=Release" \
+ || echo "NOTE: adjust the workspace path in Dockerfile.dynamixel if the build step failed."

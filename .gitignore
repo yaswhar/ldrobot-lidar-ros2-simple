@@ -54,3 +54,6 @@ CATKIN_IGNORE
 # Visual Studio Code
 .vscode
 .vscode/*
+
+# Graphify
+graphify-out/
