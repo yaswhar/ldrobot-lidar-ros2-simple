@@ -56,18 +56,28 @@ DESIGN_C = 0.77
 DESIGN_D = 0.10
 
 H_HIGH = 1.18            # m  (top of the stroke, reached at gamma=0)
-H_LOW = 0.68            # m  (bottom of the stroke, reached at gamma=0)
+H_LOW = 0.65            # m  (bottom of the stroke, reached at gamma=0; 15 mm above
+                        #     the true 0.635 m floor -- alpha/beta binding, no
+                        #     singularity there, dh/dangle ~ 0.44 m/rad at the floor)
 GAMMA_AMP_DEG = 30.0    # tilt amplitude (reached at h_mid)
 
 # --- Reference LEG (one-way) motion that anchors the torque model -------------
-#  The validated baseline is the h_high<->h_low, gamma +amp<->-amp one-way sweep
+#  The validated baseline is the 1.18<->0.68 m, gamma +amp<->-amp one-way sweep
 #  at T_REF; it produces peak ~1.07 N.m / rms ~0.70 N.m at the joint (direct
 #  drive).  We anchor the (shape-aware) torque model on THIS motion's peak/rms
 #  joint acceleration, then scale a candidate motion's torque by its acceleration
 #  ratio (inertial term) plus a constant gravity term.
+#
+#  CRITICAL: the reference leg is PINNED to these fixed constants, NOT to the
+#  trajectory's h_low/h_high. The 1.07/0.70 anchor was measured for the 0.68
+#  stroke; if the reference tracked trajectory.h_low, then widening the stroke
+#  (e.g. h_low 0.68->0.65) would grow the denominator and UNDER-report torque for
+#  a MORE demanding motion -- the ratio would fall when the load actually rises.
 T_REF = 3.0
 TORQUE_PEAK_REF_NM = 1.07
 TORQUE_RMS_REF_NM = 0.70
+H_REF_HIGH = 1.18       # pinned reference-leg stroke top (do NOT tie to trajectory)
+H_REF_LOW = 0.68        # pinned reference-leg stroke bottom (the validated baseline)
 
 # --- XC430-W150-T catalog (direct drive, gear_ratio = 1.0 unless overridden) --
 MOTOR_STALL_TORQUE_NM = 1.5
@@ -263,14 +273,19 @@ class OscillationPlannerNode(Node):
         """Per-joint peak & rms |accel| of the validated one-way leg at T_REF.
 
         Uses the precise root finder (startup-only) so the anchor is exact.
+
+        PINNED to the fixed H_REF_* / GAMMA_AMP_DEG baseline, NOT the trajectory
+        params: this leg is the physical motion that was measured at 1.07/0.70
+        N.m. Tying it to self.h_low would let a wider stroke shrink the anchor's
+        acceleration and silently UNDER-report the torque of the bigger motion.
         """
         n = 600
         seqs = {'theta': [], 'alpha': [], 'beta': []}
         seed = None
         for i in range(n + 1):
             s = 0.5 * (1.0 - math.cos(math.pi * i / n))   # raised cosine, one way
-            h = self.h_high + s * (self.h_low - self.h_high)
-            g = self.gamma_amp + s * (-self.gamma_amp - self.gamma_amp)
+            h = H_REF_HIGH + s * (H_REF_LOW - H_REF_HIGH)
+            g = GAMMA_AMP_DEG + s * (-GAMMA_AMP_DEG - GAMMA_AMP_DEG)
             sol = self.kin.solve(h, g, seed=seed)
             if sol is None:
                 sol = seed if seed else (0.0, 0.0, 0.0)

@@ -21,16 +21,25 @@
     # so the path stays inside the achievable envelope (which narrows toward
     # h_mid as |gamma| grows) by construction.
     trajectory:
-      h_high: 1.18                 # m  (top of stroke, at gamma=0)
-      h_low: 0.68                  # m  (bottom of stroke, at gamma=0)
+      h_high: 1.18                 # m  (top of stroke, at gamma=0). Kept 30 mm
+                                   #     below the 1.210 m ceiling, where dh/dtheta
+                                   #     collapses (a real singularity) -- leave it.
+      h_low: 0.65                  # m  (bottom of stroke, at gamma=0). True floor
+                                   #     is 0.635 m (alpha/beta binding); 0.65
+                                   #     leaves 15 mm margin. NOT a singularity --
+                                   #     dh/dangle ~ 0.44 m/rad down to the floor,
+                                   #     so approaching it is safe (side links reach
+                                   #     ~1.7 deg at the bottom of the loop).
       gamma_amplitude_deg: 30.0    # tilt amplitude (at h_mid)
 
     # --- laps: repeat the full ellipse loop N times, each independently timed ---
     # One entry per lap (default 3 laps: slow/medium/fast). The ellipse adds a
     # full tilt oscillation the old monotonic leg lacked, so the side links see
-    # ~1.5x the inertial load; the fast lap (7.0s) sits comfortably under the
-    # 90%-stall gate. A lap that fails the gate is auto-slowed (loud warning) to
-    # the fastest duration that passes.
+    # ~1.5x the inertial load; with the 0.53 m stroke the fast lap (7.0s) sits at
+    # ~78% of stall, still under the 90%-stall gate. A lap that fails the gate is
+    # auto-slowed (loud warning) to the fastest duration that passes. The torque
+    # anchor is pinned to the validated 1.18<->0.68 leg (see oscillation_planner_
+    # node.py H_REF_*), so these gate numbers do not drift when the stroke changes.
     lap_durations_s: [12.0, 9.0, 7.0]
 
     # --- inverse-kinematics lookup table (step 3) ---

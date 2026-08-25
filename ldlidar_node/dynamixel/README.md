@@ -54,6 +54,14 @@ grows** (theta has no gamma term, but the side-link coupling
 inside it by construction. The loop repeats for the laps in `lap_durations_s`,
 each independently timed.
 
+The stroke ends are chosen against the mechanism's true reach (both links must
+solve): the floor is **0.635 m** (alpha/beta binding), the ceiling **1.210 m**.
+`h_low = 0.65` sits 15 mm above the floor — safe, because the floor is a
+*boundary* at angle→0°, **not** a singularity (`dh/dangle ≈ 0.44 m/rad` right
+down to it), though the side links do reach ~1.7° at the bottom of the loop.
+`h_high = 1.18` stays 30 mm below the ceiling on purpose: there `dh/dtheta`
+collapses toward 0 (a real singularity as theta→90°), so it is left conservative.
+
 Inverse kinematics uses a **precomputed lookup table** (built offline by
 `generate_ik_lut.py`, cached to `~/.cache/ldlidar_platform/ik_lut.npz`, rebuilt
 on first startup if missing):
@@ -132,9 +140,12 @@ laps (slow → medium → fast):
 
 | lap | duration | peak torque | rms | verdict |
 |-----|----------|-------------|-----|---------|
-| 1 | 12.0 s | 0.74 N·m (49% stall) | 0.46 N·m | PASS |
-| 2 | 9.0 s | 0.90 N·m (60% stall) | 0.54 N·m | PASS |
-| 3 | 7.0 s | 1.14 N·m (76% stall) | 0.67 N·m | PASS |
+| 1 | 12.0 s | 0.75 N·m (50% stall) | 0.46 N·m | PASS |
+| 2 | 9.0 s | 0.92 N·m (61% stall) | 0.55 N·m | PASS |
+| 3 | 7.0 s | 1.17 N·m (78% stall) | 0.68 N·m | PASS |
+
+(Numbers for the 0.53 m stroke, i.e. `h_low = 0.65`. The old 0.50 m stroke read
+49 / 60 / 76 %.)
 
 The planner runs a **shape-aware torque-feasibility gate** at startup for every
 lap. It anchors on the validated one-way leg at `T_REF=3.0 s` (peak ~1.07 N·m /
@@ -145,6 +156,13 @@ whose estimated peak exceeds 90% of stall (1.35 N·m) or whose rms exceeds rated
 using the `accel ∝ 1/T²` relation. The ellipse adds a full tilt oscillation the
 old monotonic leg lacked, so the side links carry ~1.5× the inertial load — which
 is why a naive 6.0 s lap trips the gate and 7.0 s is the fast default.
+
+> **The reference leg is PINNED** to the validated 1.18↔0.68 m stroke
+> (`H_REF_*`), *not* to `trajectory.h_low`. If it tracked h_low, widening the
+> stroke would grow the anchor's acceleration (the denominator) and make a *more*
+> demanding motion report *less* torque — the numbers would fall when the load
+> rises. Pinning keeps the gate honest: the 0.53 m stroke correctly reads 78 %
+> (up from 76 %), not a bogus 37 %.
 
 > The feasibility sweep uses the **precise** root finder, not the LUT: double-
 > differentiating the tick-quantized LUT would manufacture phantom acceleration.
@@ -159,8 +177,17 @@ is why a naive 6.0 s lap trips the gate and 7.0 s is the fast default.
 - **Creep** slowly to the first commanded pose (`creep_profile_velocity_rad_s`).
 - **Revolution-safety check** at startup: reads Present Position and, if it sits
   a whole multiple of 4096 outside the soft-limit band, software-corrects it and
-  warns loudly instead of driving a full turn to the wrong pose. Startup also
-  logs the expected raw/homed tick ranges to eyeball before power.
+  warns loudly instead of driving a full turn to the wrong pose.
+- **Operating-range logging, learned not hardcoded.** At startup the node logs
+  the *soft-limit envelope* (raw/homed tick ranges) as a worst-case bound to
+  eyeball before power. Then it logs the **actual operating range** — the running
+  min/max of the angles the planner really commands on `/joint_goal` — re-logged
+  whenever the envelope grows during the first lap, then quiet. This replaces the
+  old hand-maintained `sanity_range_deg` YAML constant (which went stale the
+  moment the trajectory changed): the range now arrives *through the topic
+  boundary*, so the actuator learns it from whatever planner is connected — a
+  future `lidar_planner_node` needs no change here, and nothing mechanism-specific
+  leaks into the hardware layer.
 
 ## Files
 

@@ -38,20 +38,21 @@
 
     # --- per-logical-joint soft angle limits (deg) -- SAFETY BACKSTOP ---
     # Enforced on EVERY goal regardless of what a (future lidar) planner asks.
-    # Kept slightly wider than the kinematic range so the real trajectory
-    # (theta end ~5.6 deg, alpha end ~1.9 deg) is not clamped.
+    # Kept wider than the elliptical trajectory (theta 2.8..73.3 deg, alpha/beta
+    # ~1.7..73.2 deg) so the real motion is never clamped. This is the hardware
+    # bound; it does NOT track the trajectory and is what the startup log reports
+    # as the worst-case envelope before power.
     limits:
       theta: {min_deg: 0.0, max_deg: 80.0}
       alpha: {min_deg: 0.0, max_deg: 85.0}
       beta:  {min_deg: 0.0, max_deg: 80.0}
 
-    # --- kinematic operating range per joint (startup sanity log ONLY) ---
-    # Reproduces the bench-measured tick ranges the operator eyeballs before
-    # power: ID1 1974->1214, ID2 544->-216, ID3 1002->84, ID4 2980->2318.
-    sanity_range_deg:
-      theta: [6.5, 73.3]
-      alpha: [1.9, 82.6]
-      beta:  [8.1, 66.3]
+    # NOTE: there is deliberately NO sanity_range_deg here anymore. The actual
+    # operating range is LEARNED at runtime from the /joint_goal stream and logged
+    # by the node (=== observed operating range ===), so it always reflects the
+    # planner's real trajectory instead of a hand-maintained constant that goes
+    # stale whenever the ellipse is retuned. The startup "soft-limit envelope" log
+    # (from `limits` above) is the pre-power worst-case eyeball bound.
 
     # --- motion profiles (firmware trapezoidal profile) ---
     default_profile_velocity_rad_s: 0.6   # used when a goal omits velocity

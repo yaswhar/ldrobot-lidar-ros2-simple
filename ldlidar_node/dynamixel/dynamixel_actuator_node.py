@@ -161,17 +161,38 @@ class PhysicalMotor:
 
 
 class LogicalJoint:
-    """A named joint ("theta"/"alpha"/"beta") backed by 1 or 2 physical motors."""
+    """A named joint ("theta"/"alpha"/"beta") backed by 1 or 2 physical motors.
 
-    def __init__(self, name, motors, min_deg, max_deg, sanity_range):
+    `obs_lo`/`obs_hi` are the OBSERVED operating envelope: the running min/max of
+    the angles actually commanded on /joint_goal. They start empty (None) and are
+    filled in as goals arrive, so the "expected operating range" is learned from
+    whatever planner is connected rather than hand-maintained in YAML -- a future
+    lidar_planner_node needs no config change here. The genuine hardware bound is
+    min_deg/max_deg (the soft-limit safety backstop), which never goes stale.
+    """
+
+    def __init__(self, name, motors, min_deg, max_deg):
         self.name = name
         self.motors = motors          # list[PhysicalMotor]
         self.min_deg = float(min_deg)
         self.max_deg = float(max_deg)
-        self.sanity_range = sanity_range  # (lo_deg, hi_deg) for startup log
+        self.obs_lo = None            # observed min commanded angle (deg)
+        self.obs_hi = None            # observed max commanded angle (deg)
 
     def clamp_deg(self, angle_deg):
         return max(self.min_deg, min(self.max_deg, angle_deg))
+
+    def observe(self, angle_deg):
+        """Fold a commanded angle into the observed envelope. Returns True if the
+        envelope expanded (so the caller can re-log the operating range)."""
+        expanded = False
+        if self.obs_lo is None or angle_deg < self.obs_lo:
+            self.obs_lo = angle_deg
+            expanded = True
+        if self.obs_hi is None or angle_deg > self.obs_hi:
+            self.obs_hi = angle_deg
+            expanded = True
+        return expanded
 
 
 class DynamixelActuatorNode(Node):
@@ -205,10 +226,11 @@ class DynamixelActuatorNode(Node):
         self.declare_parameter('limits.beta.min_deg', 0.0)
         self.declare_parameter('limits.beta.max_deg', 80.0)
 
-        # kinematic operating range per joint (startup sanity log ONLY)
-        self.declare_parameter('sanity_range_deg.theta', [6.5, 73.3])
-        self.declare_parameter('sanity_range_deg.alpha', [1.9, 82.6])
-        self.declare_parameter('sanity_range_deg.beta', [8.1, 66.3])
+        # NOTE: there is deliberately NO sanity_range_deg parameter. The expected
+        # operating range is LEARNED from the live /joint_goal stream (see
+        # LogicalJoint.observe + _log_observed_range), not hand-maintained here --
+        # a hardcoded range goes stale the moment the trajectory changes, and the
+        # actuator must stay decoupled from the planner's geometry anyway.
 
         # motion defaults / profiles
         self.declare_parameter('default_profile_velocity_rad_s', 0.6)
@@ -251,11 +273,12 @@ class DynamixelActuatorNode(Node):
         self.first_goal_received = False   # first goal -> creep behaviour
         self.fault_latched = False
         self._current_over_count = {m.id: 0 for m in self.all_motors}
+        self._observed_dirty = False       # observed envelope grew -> re-log
 
         # These two are pure calculation -- log them BEFORE touching hardware so
-        # the operator can eyeball the mapping/ranges even if the bus is down.
+        # the operator can eyeball the mapping/limits even if the bus is down.
         self._log_mapping()
-        self._log_sanity_ranges()
+        self._log_softlimit_envelope()
 
         if not DXL_SDK_AVAILABLE:
             self.get_logger().fatal(
@@ -287,6 +310,8 @@ class DynamixelActuatorNode(Node):
             JointState, self.goal_topic, self._on_goal, 10)
         self.state_timer = self.create_timer(
             1.0 / max(1.0, self.state_publish_rate), self._publish_state)
+        # slow timer: re-log the observed operating range whenever it expands
+        self.range_log_timer = self.create_timer(2.0, self._log_observed_range)
 
         self.get_logger().info(
             f'dynamixel_actuator ready. Listening on {self.goal_topic}, '
@@ -307,9 +332,7 @@ class DynamixelActuatorNode(Node):
                       for mid, d, raw in zip(ids, dirs, raws)]
             min_deg = float(self.get_parameter(f'limits.{name}.min_deg').value)
             max_deg = float(self.get_parameter(f'limits.{name}.max_deg').value)
-            sr = list(self.get_parameter(f'sanity_range_deg.{name}').value)
-            sanity = (float(sr[0]), float(sr[1])) if len(sr) >= 2 else (min_deg, max_deg)
-            joints[name] = LogicalJoint(name, motors, min_deg, max_deg, sanity)
+            joints[name] = LogicalJoint(name, motors, min_deg, max_deg)
         return joints
 
     def _log_mapping(self):
@@ -325,23 +348,52 @@ class DynamixelActuatorNode(Node):
             'goal_ticks = round(direction * angle_deg * 4096/360)')
         self.get_logger().info('=========================================')
 
-    def _log_sanity_ranges(self):
-        """Log expected raw + homed tick ranges so the operator can eyeball them
-        BEFORE power is applied (reproduces the bench-measured values)."""
+    def _log_joint_ticks(self, joint, lo, hi):
+        """Log one joint's [lo, hi] deg as raw + homed tick ranges per motor."""
         c = 1.0 / DEG_PER_TICK
-        self.get_logger().info('=== startup sanity ranges (eyeball before power) ===')
+        for m in joint.motors:
+            raw_lo = round(m.raw_offset - lo * c)   # raw @ homing offset 0
+            raw_hi = round(m.raw_offset - hi * c)
+            homed_lo = round(m.direction * lo * c)  # homed present (runtime)
+            homed_hi = round(m.direction * hi * c)
+            self.get_logger().info(
+                f'  ID{m.id} ({joint.name}): {lo:.1f}..{hi:.1f} deg -> raw '
+                f'{raw_lo}..{raw_hi} ticks | homed present {homed_lo}..{homed_hi}')
+
+    def _log_softlimit_envelope(self):
+        """Log the SOFT-LIMIT envelope (raw + homed tick ranges) so the operator
+        can eyeball a worst-case bound BEFORE power is applied. These are the
+        safety-backstop limits: guaranteed never exceeded, and -- unlike a
+        hardcoded trajectory range -- never stale. The ACTUAL operating range is
+        reported separately once /joint_goal starts streaming (see
+        _log_observed_range), learned from whatever planner is connected."""
+        self.get_logger().info('=== soft-limit envelope (eyeball before power) ===')
+        for name in self.joint_names:
+            self._log_joint_ticks(self.joints[name],
+                                  self.joints[name].min_deg,
+                                  self.joints[name].max_deg)
+        self.get_logger().info(
+            '  worst-case bound; actual operating range is logged from the live '
+            '/joint_goal stream (learned from the planner, not hardcoded).')
+        self.get_logger().info('==================================================')
+
+    def _log_observed_range(self):
+        """Log the operating range LEARNED from /joint_goal so far, but only when
+        it has grown since the last log (so it settles to a few lines during the
+        first lap, then goes quiet). This REPLACES the old hand-maintained
+        sanity_range_deg: it reflects the planner's real trajectory through the
+        topic boundary, so it never goes stale and needs no change for a future
+        lidar_planner_node. Runs on a slow timer -- not in the goal hot path."""
+        if not self._observed_dirty:
+            return
+        if any(self.joints[n].obs_lo is None for n in self.joint_names):
+            return  # wait until every logical joint has been commanded at least once
+        self._observed_dirty = False
+        self.get_logger().info('=== observed operating range (from /joint_goal) ===')
         for name in self.joint_names:
             j = self.joints[name]
-            lo, hi = j.sanity_range
-            for m in j.motors:
-                raw_lo = round(m.raw_offset - lo * c)   # raw @ homing offset 0
-                raw_hi = round(m.raw_offset - hi * c)
-                homed_lo = round(m.direction * lo * c)  # homed present (runtime)
-                homed_hi = round(m.direction * hi * c)
-                self.get_logger().info(
-                    f'  ID{m.id} ({name}): {lo:.1f}..{hi:.1f} deg -> raw '
-                    f'{raw_lo}..{raw_hi} ticks | homed present {homed_lo}..{homed_hi}')
-        self.get_logger().info('====================================================')
+            self._log_joint_ticks(j, j.obs_lo, j.obs_hi)
+        self.get_logger().info('==================================================')
 
     # ------------------------------------------------------------- bring-up
     def _connect(self):
@@ -502,6 +554,9 @@ class DynamixelActuatorNode(Node):
                     f'-> clamped to {clamped:.2f} deg (SAFETY BACKSTOP).')
             goal_deg[name] = clamped
             goal_vel[name] = abs(msg.velocity[i]) if i < len(msg.velocity) else 0.0
+            # learn the operating envelope from what the planner actually commands
+            if self.joints[name].observe(clamped):
+                self._observed_dirty = True
 
         if not goal_deg:
             self.get_logger().warn('Received /joint_goal with no known joint names.')
