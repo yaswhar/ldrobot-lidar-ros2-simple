@@ -1,15 +1,11 @@
 # ldlidar_node/params/oscillation_planner.yaml
 #
 # MOTION-PLANNING config for oscillation_planner_node.
-# Owns: mechanism geometry, trajectory, per-mode cycle times, torque model.
-# NOTHING about DynamixelSDK / motor IDs / ticks lives here.
+# Owns: mechanism geometry, elliptical trajectory, IK lookup-table grid, per-lap
+# timing, torque model. NOTHING about DynamixelSDK / motor IDs / ticks lives here.
 
 /**:
   ros__parameters:
-    mode: 2                 # 1=slow(6.0s) 2=normal(4.5s) 3=fast(3.0s); overridden
-                            # by the launch 'mode' argument.
-    repeat: 1               # number of full round trips per invocation
-
     # --- mechanism geometry (baseline design point, metres) ---
     geometry:
       a: 0.11
@@ -17,28 +13,49 @@
       c: 0.77
       d: 0.10
 
-    # --- oscillation trajectory (the validated reference case) ---
+    # --- elliptical trajectory (step 2) ---
+    # Single continuous closed curve in (h, gamma):
+    #   h(phi)     = h_mid + (stroke/2) cos(phi),  h_mid=(h_high+h_low)/2
+    #   gamma(phi) = gamma_amplitude_deg * sin(phi)
+    # h_high/h_low are reached only at gamma=0; the tilt extremes occur at h_mid,
+    # so the path stays inside the achievable envelope (which narrows toward
+    # h_mid as |gamma| grows) by construction.
     trajectory:
-      h_start: 1.18         # m  (start limit, high)
-      h_end: 0.68           # m  (end limit, low)
-      gamma_start_deg: 30.0 # tilt at start
-      gamma_end_deg: -30.0  # tilt at end
+      h_high: 1.18                 # m  (top of stroke, at gamma=0)
+      h_low: 0.68                  # m  (bottom of stroke, at gamma=0)
+      gamma_amplitude_deg: 30.0    # tilt amplitude (at h_mid)
 
-    # --- per-mode LEG (one-way / half-cycle) time [s] ---
-    # NOTE: T is the one-way sweep duration (reproduces the reference peak
-    # speeds). A full round trip is 2*T. Fastest (mode 3) == validated baseline.
-    mode_times:
-      mode1_s: 6.0          # slow
-      mode2_s: 4.5          # normal
-      mode3_s: 3.0          # fast (== reference case)
+    # --- laps: repeat the full ellipse loop N times, each independently timed ---
+    # One entry per lap (default 3 laps: slow/medium/fast). The ellipse adds a
+    # full tilt oscillation the old monotonic leg lacked, so the side links see
+    # ~1.5x the inertial load; the fast lap (7.0s) sits comfortably under the
+    # 90%-stall gate. A lap that fails the gate is auto-slowed (loud warning) to
+    # the fastest duration that passes.
+    lap_durations_s: [12.0, 9.0, 7.0]
+
+    # --- inverse-kinematics lookup table (step 3) ---
+    # Built OFFLINE by generate_ik_lut.py (or on first node startup) and cached to
+    # disk; the runtime loop only interpolates it (O(1), deterministic).
+    lut:
+      h_step_m: 0.005              # 5 mm grid in h
+      gamma_step_deg: 1.0          # 1 deg grid in gamma
+      gamma_amp_deg: 30.0          # table covers gamma in [-amp, +amp]
+      cache_path: '~/.cache/ldlidar_platform/ik_lut.npz'
+      force_rebuild: false         # true to ignore/overwrite the cache
+
+    # --- streaming / firmware motion profile ---
+    control_rate_hz: 50.0          # waypoint stream rate (also the lap resolution)
+    start_settle_s: 3.0            # creep-to-start hold before the first lap
+    creep_velocity_rad_s: 0.15     # slow speed for the creep-to-start move
+    min_profile_velocity_rad_s: 0.05  # floor (0 would mean "unlimited" in firmware)
+    max_profile_velocity_rad_s: 6.0   # cap on the per-waypoint profile velocity
 
     # --- torque / feasibility model ---
     gear_ratio: 1.0                 # motor:joint reduction (1.0 = direct drive)
     gravity_torque_fraction: 0.5    # fraction of the anchored 1.07 N.m peak that
-                                    # is gravity (T-independent); the rest scales
-                                    # as 1/T^2. Conservative default; tune if a
-                                    # dynamic model is available.
+                                    # is gravity (T-independent); the rest is the
+                                    # inertial term (scales with joint accel).
 
-    # --- arrival detection ---
-    arrival_tolerance_deg: 1.5
-    start_settle_s: 3.0             # extra time for the creep-to-start move
+    # --- topics ---
+    goal_topic: '/joint_goal'
+    state_topic: '/joint_states'

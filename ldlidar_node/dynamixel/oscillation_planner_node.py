@@ -2,9 +2,9 @@
 """
 oscillation_planner_node.py  --  MOTION-PLANNING LAYER
 
-Owns the parallel-linkage mechanism geometry, inverse kinematics and the three
-speed modes.  It computes theta/alpha/beta goal angles for the coordinated
-move+tilt oscillation and publishes them to /joint_goal.
+Owns the parallel-linkage mechanism geometry and inverse kinematics.  It drives
+a smooth elliptical move+tilt oscillation and publishes theta/alpha/beta goals
+to /joint_goal.
 
 This node is DELIBERATELY throw-away: a future lidar_planner_node can replace it
 with ZERO changes to the actuator, because the ONLY thing they share is the
@@ -15,172 +15,75 @@ message contract:
 NOTHING about DynamixelSDK, motor IDs or raw ticks belongs in this node.  If you
 find yourself wanting to `import dynamixel_sdk` here, the boundary is wrong.
 
-Motion shape (identical every time, only the cycle time T differs):
-    one full round trip  start-limit -> end-limit -> back-to-start-limit
-    per invocation (not continuous unless repeat > 1).
+Motion shape (step 2): a single continuous closed ELLIPSE in (h, gamma) space
+    h(phi)     = h_mid + (stroke/2) * cos(phi)
+    gamma(phi) = gamma_amp * sin(phi)          phi in [0, 2*pi)
+with h_mid=(h_high+h_low)/2, stroke=h_high-h_low.  h_high/h_low are only reached
+at gamma=0; the tilt extremes occur at h_mid -- the ellipse stays inside the
+achievable envelope (which narrows toward h_mid as |gamma| grows) by construction.
+
+Runtime IK (step 3): NO live root finding.  A precomputed lookup table (built
+offline by generate_ik_lut.py, cached to disk) is queried by bilinear/linear
+interpolation -- O(1) and fully deterministic, the right tool for the tight
+reactive loop this is meant to become.
 """
 
 import math
+import os
 
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 
+try:
+    from platform_kinematics import PlatformKinematics
+    from generate_ik_lut import (IKTable, build_lut, load_lut, save_lut,
+                                  signature_matches)
+except ImportError:
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from platform_kinematics import PlatformKinematics
+    from generate_ik_lut import (IKTable, build_lut, load_lut, save_lut,
+                                  signature_matches)
+
 
 # =============================================================================
-# MECHANISM CONSTANTS  (single labelled block -- do NOT scatter these)
+# MECHANISM / MOTOR CONSTANTS  (single labelled block -- do NOT scatter these)
 # =============================================================================
-# --- Baseline design point (metres) ---
 DESIGN_A = 0.11
 DESIGN_B = 0.44
 DESIGN_C = 0.77
 DESIGN_D = 0.10
 
-# --- Baseline trajectory (the validated reference case) ---
-H_START = 1.18          # m  (start limit, high)
-H_END = 0.68            # m  (end limit, low)
-GAMMA_START_DEG = +30.0  # tilt at start
-GAMMA_END_DEG = -30.0    # tilt at end
+H_HIGH = 1.18            # m  (top of the stroke, reached at gamma=0)
+H_LOW = 0.68            # m  (bottom of the stroke, reached at gamma=0)
+GAMMA_AMP_DEG = 30.0    # tilt amplitude (reached at h_mid)
 
-# --- Reference case timing (defines the peak-speed constants below) ---
-#  T_REF is the ONE-WAY (half-cycle / leg) sweep duration for which the joint
-#  ranges & peak speeds were computed.  A full round trip = 2 * leg time.
+# --- Reference LEG (one-way) motion that anchors the torque model -------------
+#  The validated baseline is the h_high<->h_low, gamma +amp<->-amp one-way sweep
+#  at T_REF; it produces peak ~1.07 N.m / rms ~0.70 N.m at the joint (direct
+#  drive).  We anchor the (shape-aware) torque model on THIS motion's peak/rms
+#  joint acceleration, then scale a candidate motion's torque by its acceleration
+#  ratio (inertial term) plus a constant gravity term.
 T_REF = 3.0
-
-# --- Known joint ranges & peak speeds @ T_REF=3.0 s leg (reference values) ---
-REF_RANGE_DEG = {           # (min, max)
-    'theta': (6.5, 73.3),
-    'alpha': (1.9, 82.6),
-    'beta': (8.1, 66.3),
-}
-REF_PEAK_SPEED_DEG_S = {    # peak angular speed at the reference leg time
-    'theta': 34.5,
-    'alpha': 42.2,
-    'beta': 28.5,
-}
-
-# --- XC430-W150-T catalog (direct drive, gear_ratio = 1.0 unless overridden) ---
-MOTOR_STALL_TORQUE_NM = 1.5
-MOTOR_RATED_TORQUE_NM = 0.83
-MOTOR_NO_LOAD_RPM = 70.0
-MOTOR_RATED_CURRENT_A = 1.3
-
-# --- Torque anchor: the ONE computed load point we have (@ T_REF=3.0 s leg) ---
-#  peak ~= 1.07 N.m, rms ~= 0.70 N.m at the joint (direct drive).  For other
-#  leg times we extrapolate with a gravity(constant)+inertia(1/T^2) model
-#  anchored here.  Because the FAST mode's leg == T_REF, and torque is
-#  non-increasing with T, every mode is at or below this validated point.
 TORQUE_PEAK_REF_NM = 1.07
 TORQUE_RMS_REF_NM = 0.70
 
-# Feasibility gate thresholds (per spec):
-#   refuse if estimated peak > 90% of stall, or rms > rated torque.
+# --- XC430-W150-T catalog (direct drive, gear_ratio = 1.0 unless overridden) --
+MOTOR_STALL_TORQUE_NM = 1.5
+MOTOR_RATED_TORQUE_NM = 0.83
+MOTOR_NO_LOAD_RPM = 70.0
+
+# Feasibility gate: refuse if estimated peak > 90% of stall, or rms > rated.
 PEAK_TORQUE_LIMIT_NM = 0.90 * MOTOR_STALL_TORQUE_NM   # 1.35 N.m
 RMS_TORQUE_LIMIT_NM = MOTOR_RATED_TORQUE_NM           # 0.83 N.m
 
-# Mode -> leg (one-way) cycle time T [s].  Fastest == validated baseline.
-DEFAULT_MODE_T = {1: 6.0, 2: 4.5, 3: 3.0}
-MODE_NAME = {1: 'slow', 2: 'normal', 3: 'fast'}
-
-
-class PlatformKinematics:
-    """Inverse kinematics for the parallel-linkage platform.
-
-    All angles in degrees internally.  h(angle) is non-monotonic (multiple IK
-    roots) so each solve picks the branch closest to the previous solution.
-    """
-
-    def __init__(self, a, b, c, d):
-        self.a = a
-        self.b = b
-        self.c = c
-        self.d = d
-
-    # --- forward height maps -------------------------------------------------
-    def h_center(self, theta_deg):
-        """Height of the central link:  h = b sin(th) + sqrt(c^2 - (b cos(th) - (a-d)/2)^2)."""
-        th = math.radians(theta_deg)
-        inner = self.c ** 2 - (self.b * math.cos(th) - (self.a - self.d) / 2.0) ** 2
-        if inner < 0.0:
-            return None
-        return self.b * math.sin(th) + math.sqrt(inner)
-
-    def h_side(self, angle_deg, gamma_deg):
-        """Height of a side link at tilt gamma:
-        h = b sin(a) + sqrt(c^2 - (b cos(a) - (a - d cos(g))/2)^2)."""
-        ang = math.radians(angle_deg)
-        gam = math.radians(gamma_deg)
-        inner = self.c ** 2 - (
-            self.b * math.cos(ang) - (self.a - self.d * math.cos(gam)) / 2.0) ** 2
-        if inner < 0.0:
-            return None
-        return self.b * math.sin(ang) + math.sqrt(inner)
-
-    # --- root finding --------------------------------------------------------
-    @staticmethod
-    def _roots(func, target, lo_deg=0.0, hi_deg=90.0, step_deg=0.5):
-        """Return all angle-deg roots of func(angle) == target in [lo, hi]."""
-        roots = []
-        prev_a = lo_deg
-        prev_f = func(prev_a)
-        a = lo_deg + step_deg
-        while a <= hi_deg + 1e-9:
-            f = func(a)
-            if prev_f is not None and f is not None:
-                if (prev_f - target) == 0.0:
-                    roots.append(prev_a)
-                elif (prev_f - target) * (f - target) < 0.0:
-                    # bisect the bracket [prev_a, a]
-                    xa, xb = prev_a, a
-                    fa = prev_f - target
-                    for _ in range(60):
-                        xm = 0.5 * (xa + xb)
-                        fm = func(xm)
-                        if fm is None:
-                            break
-                        fm -= target
-                        if abs(fm) < 1e-9 or (xb - xa) < 1e-5:
-                            break
-                        if fa * fm < 0.0:
-                            xb = xm
-                        else:
-                            xa, fa = xm, fm
-                    roots.append(0.5 * (xa + xb))
-            prev_a, prev_f = a, f
-            a += step_deg
-        return roots
-
-    def _solve(self, func, target, seed_deg, lo_deg, hi_deg):
-        roots = self._roots(func, target, lo_deg, hi_deg)
-        if not roots:
-            return None
-        # pick the branch closest to the previous solution
-        return min(roots, key=lambda r: abs(r - seed_deg))
-
-    def solve(self, h_center_target, gamma_deg, seed=None,
-              lo_deg=0.0, hi_deg=90.0):
-        """Solve theta/alpha/beta (deg) for a target central height and tilt.
-
-        Coupling:  h_alpha = h + (d/2) sin(g),  h_beta = h - (d/2) sin(g).
-        `seed` is the previous (theta, alpha, beta) solution used to stay on the
-        same IK branch and avoid solution jumps.
-        """
-        gam = math.radians(gamma_deg)
-        h_alpha = h_center_target + (self.d / 2.0) * math.sin(gam)
-        h_beta = h_center_target - (self.d / 2.0) * math.sin(gam)
-
-        seed_th = seed[0] if seed else 40.0
-        seed_al = seed[1] if seed else 40.0
-        seed_be = seed[2] if seed else 37.0
-
-        theta = self._solve(self.h_center, h_center_target, seed_th, lo_deg, hi_deg)
-        alpha = self._solve(lambda x: self.h_side(x, gamma_deg), h_alpha,
-                            seed_al, lo_deg, hi_deg)
-        beta = self._solve(lambda x: self.h_side(x, gamma_deg), h_beta,
-                           seed_be, lo_deg, hi_deg)
-        if None in (theta, alpha, beta):
-            return None
-        return (theta, alpha, beta)
+# 3 laps, each independently timed. The ellipse adds a full tilt oscillation
+# (gamma 0->+amp->0->-amp->0 per lap) that the old monotonic leg lacked, so the
+# side links see ~1.5x the inertial load of the leg baseline; the fast lap (7.0s)
+# is chosen for comfortable margin under the 90%-stall gate. A lap that still
+# fails the gate is auto-slowed (loud warning) to the fastest duration that passes.
+DEFAULT_LAP_DURATIONS_S = [12.0, 9.0, 7.0]
 
 
 class OscillationPlannerNode(Node):
@@ -188,274 +91,375 @@ class OscillationPlannerNode(Node):
         super().__init__('oscillation_planner')
 
         # ---- parameters -----------------------------------------------------
-        self.declare_parameter('mode', 2)                    # 1|2|3
-        self.declare_parameter('repeat', 1)                  # full round trips
         self.declare_parameter('goal_topic', '/joint_goal')
         self.declare_parameter('state_topic', '/joint_states')
 
-        # geometry (baseline design point)
         self.declare_parameter('geometry.a', DESIGN_A)
         self.declare_parameter('geometry.b', DESIGN_B)
         self.declare_parameter('geometry.c', DESIGN_C)
         self.declare_parameter('geometry.d', DESIGN_D)
 
-        # trajectory
-        self.declare_parameter('trajectory.h_start', H_START)
-        self.declare_parameter('trajectory.h_end', H_END)
-        self.declare_parameter('trajectory.gamma_start_deg', GAMMA_START_DEG)
-        self.declare_parameter('trajectory.gamma_end_deg', GAMMA_END_DEG)
+        self.declare_parameter('trajectory.h_high', H_HIGH)
+        self.declare_parameter('trajectory.h_low', H_LOW)
+        self.declare_parameter('trajectory.gamma_amplitude_deg', GAMMA_AMP_DEG)
 
-        # per-mode leg (one-way) cycle times
-        self.declare_parameter('mode_times.mode1_s', DEFAULT_MODE_T[1])
-        self.declare_parameter('mode_times.mode2_s', DEFAULT_MODE_T[2])
-        self.declare_parameter('mode_times.mode3_s', DEFAULT_MODE_T[3])
+        # 3 laps per invocation, each independently timed (step 2).
+        self.declare_parameter('lap_durations_s', DEFAULT_LAP_DURATIONS_S)
+
+        # LUT (step 3)
+        self.declare_parameter('lut.h_step_m', 0.005)
+        self.declare_parameter('lut.gamma_step_deg', 1.0)
+        self.declare_parameter('lut.gamma_amp_deg', GAMMA_AMP_DEG)
+        self.declare_parameter('lut.cache_path', '~/.cache/ldlidar_platform/ik_lut.npz')
+        self.declare_parameter('lut.force_rebuild', False)
+
+        # streaming / profile
+        self.declare_parameter('control_rate_hz', 50.0)
+        self.declare_parameter('start_settle_s', 3.0)
+        self.declare_parameter('min_profile_velocity_rad_s', 0.05)
+        self.declare_parameter('max_profile_velocity_rad_s', 6.0)
+        self.declare_parameter('creep_velocity_rad_s', 0.15)
 
         # torque/feasibility model
-        self.declare_parameter('gear_ratio', 1.0)            # motor:joint (direct=1.0)
+        self.declare_parameter('gear_ratio', 1.0)
         self.declare_parameter('gravity_torque_fraction', 0.5)
 
-        # arrival detection
-        self.declare_parameter('arrival_tolerance_deg', 1.5)
-        self.declare_parameter('start_settle_s', 3.0)        # extra time for creep-to-start
-
-        self.mode = int(self.get_parameter('mode').value)
-        self.repeat = int(self.get_parameter('repeat').value)
         self.goal_topic = self.get_parameter('goal_topic').value
         self.state_topic = self.get_parameter('state_topic').value
 
-        self.kin = PlatformKinematics(
-            self.get_parameter('geometry.a').value,
-            self.get_parameter('geometry.b').value,
-            self.get_parameter('geometry.c').value,
-            self.get_parameter('geometry.d').value)
+        a = self.get_parameter('geometry.a').value
+        b = self.get_parameter('geometry.b').value
+        c = self.get_parameter('geometry.c').value
+        d = self.get_parameter('geometry.d').value
+        self.kin = PlatformKinematics(a, b, c, d)
 
-        self.h_start = float(self.get_parameter('trajectory.h_start').value)
-        self.h_end = float(self.get_parameter('trajectory.h_end').value)
-        self.gamma_start = float(self.get_parameter('trajectory.gamma_start_deg').value)
-        self.gamma_end = float(self.get_parameter('trajectory.gamma_end_deg').value)
+        self.h_high = float(self.get_parameter('trajectory.h_high').value)
+        self.h_low = float(self.get_parameter('trajectory.h_low').value)
+        self.gamma_amp = float(self.get_parameter('trajectory.gamma_amplitude_deg').value)
+        self.h_mid = 0.5 * (self.h_high + self.h_low)
+        self.stroke = self.h_high - self.h_low
 
-        self.mode_t = {
-            1: float(self.get_parameter('mode_times.mode1_s').value),
-            2: float(self.get_parameter('mode_times.mode2_s').value),
-            3: float(self.get_parameter('mode_times.mode3_s').value),
-        }
+        self.lap_durations = [float(x) for x in
+                              self.get_parameter('lap_durations_s').value]
+        if not self.lap_durations:
+            self.lap_durations = list(DEFAULT_LAP_DURATIONS_S)
+
+        self.lut_h_step = float(self.get_parameter('lut.h_step_m').value)
+        self.lut_gamma_step = float(self.get_parameter('lut.gamma_step_deg').value)
+        self.lut_gamma_amp = float(self.get_parameter('lut.gamma_amp_deg').value)
+        self.lut_cache = os.path.expanduser(self.get_parameter('lut.cache_path').value)
+        self.lut_force = bool(self.get_parameter('lut.force_rebuild').value)
+
+        self.control_rate = float(self.get_parameter('control_rate_hz').value)
+        self.start_settle_s = float(self.get_parameter('start_settle_s').value)
+        self.min_vel = float(self.get_parameter('min_profile_velocity_rad_s').value)
+        self.max_vel = float(self.get_parameter('max_profile_velocity_rad_s').value)
+        self.creep_vel = float(self.get_parameter('creep_velocity_rad_s').value)
+
         self.gear_ratio = float(self.get_parameter('gear_ratio').value)
         self.gravity_fraction = float(self.get_parameter('gravity_torque_fraction').value)
-        self.arrival_tol_deg = float(self.get_parameter('arrival_tolerance_deg').value)
-        self.start_settle_s = float(self.get_parameter('start_settle_s').value)
 
-        if self.mode not in (1, 2, 3):
-            self.get_logger().fatal(f'Invalid mode {self.mode} (must be 1, 2 or 3).')
-            raise RuntimeError('invalid mode')
-
-        if abs(self.gear_ratio - 1.0) > 1e-6:
+        if self.gamma_amp > self.lut_gamma_amp + 1e-6:
             self.get_logger().warn(
-                f'gear_ratio={self.gear_ratio} (NOT direct drive). Torque estimates '
-                f'scaled by 1/gear_ratio and speeds by gear_ratio -- confirm this is '
-                f'the real build.')
+                f'trajectory gamma amplitude {self.gamma_amp} deg exceeds the LUT '
+                f'gamma range +/-{self.lut_gamma_amp} deg; tilt will be clamped.')
 
-        # ---- solve start/end poses (branch-consistent) ----------------------
-        self.pose_start = self.kin.solve(self.h_start, self.gamma_start)
-        if self.pose_start is None:
-            self.get_logger().fatal('IK failed for the START pose. Check geometry.')
-            raise RuntimeError('IK start failed')
-        self.pose_end = self.kin.solve(self.h_end, self.gamma_end, seed=self.pose_start)
-        if self.pose_end is None:
-            self.get_logger().fatal('IK failed for the END pose. Check geometry.')
-            raise RuntimeError('IK end failed')
+        # ---- inverse-kinematics LUT (load cache or build offline) -----------
+        self.table = self._load_or_build_lut(a, b, c, d)
 
-        self.get_logger().info(
-            'IK poses (theta, alpha, beta) deg:  '
-            f'start=({self.pose_start[0]:.1f}, {self.pose_start[1]:.1f}, '
-            f'{self.pose_start[2]:.1f})  '
-            f'end=({self.pose_end[0]:.1f}, {self.pose_end[1]:.1f}, '
-            f'{self.pose_end[2]:.1f})')
+        # ---- start pose (phi=0: h_high, gamma=0) ----------------------------
+        start = self.table.solve_deg(self.h_high, 0.0)
+        if start is None:
+            self.get_logger().fatal(
+                'IK LUT has no solution for the start pose (h_high, gamma=0). '
+                'Check geometry / trajectory.')
+            raise RuntimeError('start pose unreachable')
+        self.start_pose = start
 
-        # ---- feasibility check for ALL modes; gate the selected one ---------
-        self.feasibility = {m: self._assess_mode(m) for m in (1, 2, 3)}
-        self._log_feasibility()
+        self._log_trajectory()
 
-        chosen = self.feasibility[self.mode]
-        if not chosen['feasible']:
-            fallback = self._fastest_feasible()
-            if fallback is None:
-                self.get_logger().fatal(
-                    'No mode passes the torque feasibility check. Refusing to '
-                    'publish any goals. Re-check geometry / trajectory / gearing.')
-                raise RuntimeError('no feasible mode')
-            self.get_logger().error(
-                f'Mode {self.mode} ({MODE_NAME[self.mode]}) FAILS the torque check '
-                f'(peak {chosen["peak_nm"]:.2f} N.m, rms {chosen["rms_nm"]:.2f} N.m). '
-                f'Falling back to the fastest feasible mode {fallback} '
-                f'({MODE_NAME[fallback]}, T={self.mode_t[fallback]:.1f} s).')
-            self.mode = fallback
-            chosen = self.feasibility[self.mode]
-
-        self.leg_time = self.mode_t[self.mode]
-        self.leg_peak_speed = chosen['peak_speed_rad_s']  # per-joint {name: rad/s}
-        self.get_logger().info(
-            f'Selected mode {self.mode} ({MODE_NAME[self.mode]}): leg T='
-            f'{self.leg_time:.1f} s, full round trip {2*self.leg_time:.1f} s, '
-            f'repeat={self.repeat}.')
+        # ---- feasibility check for every lap; gate/adjust -------------------
+        self.ref_peak_accel, self.ref_rms_accel = self._reference_leg_accel()
+        self.lap_plans = self._plan_laps()
 
         # ---- ROS interfaces -------------------------------------------------
         self.goal_pub = self.create_publisher(JointState, self.goal_topic, 10)
         self.state_sub = self.create_subscription(
             JointState, self.state_topic, self._on_state, 10)
-        self.last_state = None  # {name: pos_deg}
+        self.last_state = None
 
-        # ---- sequencer state machine ---------------------------------------
-        # legs: first move to START (settle), then repeat x (END, START)
-        self._legs = [('start', self.start_settle_s)]
-        for _ in range(max(1, self.repeat)):
-            self._legs.append(('end', self.leg_time))
-            self._legs.append(('start', self.leg_time))
-        self._leg_index = -1
-        self._leg_deadline = None
-        self._current_goal_deg = None
+        # ---- sequencer: creep-to-start, then the timed laps -----------------
+        self._phases = [('creep', self.start_settle_s)]
+        for dur in self.lap_plans:
+            self._phases.append(('lap', dur))
+        self._phase_index = -1
+        self._phase_start = None
         self._finished = False
 
-        self.control_timer = self.create_timer(0.05, self._tick)  # 20 Hz sequencer
+        self._dt_ctrl = 1.0 / max(1.0, self.control_rate)
+        self.control_timer = self.create_timer(self._dt_ctrl, self._tick)
         self.get_logger().info(
-            f'Publishing oscillation to {self.goal_topic}. '
-            f'{len(self._legs)} legs queued.')
+            f'Publishing elliptical oscillation to {self.goal_topic}: '
+            f'{len(self.lap_plans)} laps at {self.control_rate:.0f} Hz.')
 
-    # ------------------------------------------------------- feasibility model
-    def _sample_leg_kinematics(self, leg_time, n=200):
-        """Sample one leg (start<->end) with a raised-cosine profile and return
-        per-joint peak angular speed (rad/s) and peak |accel| (rad/s^2)."""
-        prev = self.pose_start
-        angles = {'theta': [], 'alpha': [], 'beta': []}
-        for i in range(n + 1):
-            s = 0.5 * (1.0 - math.cos(math.pi * i / n))  # 0->1 smooth
-            h = self.h_start + s * (self.h_end - self.h_start)
-            g = self.gamma_start + s * (self.gamma_end - self.gamma_start)
-            sol = self.kin.solve(h, g, seed=prev)
+    # ---------------------------------------------------------------- LUT
+    def _load_or_build_lut(self, a, b, c, d):
+        want = (a, b, c, d, self.lut_h_step, self.lut_gamma_step,
+                self.lut_gamma_amp, 0.0, 90.0)
+        if not self.lut_force and os.path.isfile(self.lut_cache):
+            try:
+                lut = load_lut(self.lut_cache)
+                if signature_matches(lut, *want):
+                    self.get_logger().info(
+                        f'Loaded IK LUT from cache: {self.lut_cache} '
+                        f'(theta {lut["theta_angle"].shape[0]}, alpha/beta '
+                        f'{lut["alpha_angle"].shape[0]}x{lut["alpha_angle"].shape[1]}).')
+                    return IKTable(lut)
+                self.get_logger().warn(
+                    'Cached IK LUT signature does not match current geometry/grid '
+                    '-- rebuilding.')
+            except Exception as exc:  # noqa: BLE001 - cache is best-effort
+                self.get_logger().warn(f'Could not read IK LUT cache ({exc}); rebuilding.')
+
+        self.get_logger().info('Building IK LUT (one-time, precise root finder)...')
+        lut = build_lut(a, b, c, d, self.lut_h_step, self.lut_gamma_step,
+                        self.lut_gamma_amp, log=lambda m: self.get_logger().info(m))
+        try:
+            path = save_lut(lut, self.lut_cache)
+            self.get_logger().info(f'Cached IK LUT to {path}.')
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f'Could not cache IK LUT ({exc}); continuing in-memory.')
+        return IKTable(lut)
+
+    # --------------------------------------------------------- trajectory
+    def _ellipse_point(self, phi):
+        return (self.h_mid + 0.5 * self.stroke * math.cos(phi),
+                self.gamma_amp * math.sin(phi))
+
+    def _log_trajectory(self):
+        # sample the ellipse via the LUT for the achieved joint ranges
+        rng = {'theta': [1e9, -1e9], 'alpha': [1e9, -1e9], 'beta': [1e9, -1e9]}
+        n = 720
+        for k in range(n):
+            phi = 2.0 * math.pi * k / n
+            h, g = self._ellipse_point(phi)
+            sol = self.table.solve_deg(h, g)
             if sol is None:
-                sol = prev
-            prev = sol
-            angles['theta'].append(math.radians(sol[0]))
-            angles['alpha'].append(math.radians(sol[1]))
-            angles['beta'].append(math.radians(sol[2]))
+                continue
+            for name, v in zip(('theta', 'alpha', 'beta'), sol):
+                rng[name][0] = min(rng[name][0], v)
+                rng[name][1] = max(rng[name][1], v)
+        self.get_logger().info(
+            f'Ellipse: h_mid={self.h_mid:.3f} m, stroke={self.stroke:.3f} m, '
+            f'gamma=+/-{self.gamma_amp:.0f} deg  (h {self.h_low:.2f}..{self.h_high:.2f}).')
+        self.get_logger().info(
+            'Achieved joint ranges over the ellipse (deg, via LUT): '
+            f'theta {rng["theta"][0]:.1f}..{rng["theta"][1]:.1f}, '
+            f'alpha {rng["alpha"][0]:.1f}..{rng["alpha"][1]:.1f}, '
+            f'beta {rng["beta"][0]:.1f}..{rng["beta"][1]:.1f}.')
 
-        dt = leg_time / n
-        peak_speed = {}
-        peak_accel = {}
-        for name, seq in angles.items():
-            vel = [(seq[i + 1] - seq[i]) / dt for i in range(n)]
+    # -------------------------------------------------------- feasibility
+    def _reference_leg_accel(self):
+        """Per-joint peak & rms |accel| of the validated one-way leg at T_REF.
+
+        Uses the precise root finder (startup-only) so the anchor is exact.
+        """
+        n = 600
+        seqs = {'theta': [], 'alpha': [], 'beta': []}
+        seed = None
+        for i in range(n + 1):
+            s = 0.5 * (1.0 - math.cos(math.pi * i / n))   # raised cosine, one way
+            h = self.h_high + s * (self.h_low - self.h_high)
+            g = self.gamma_amp + s * (-self.gamma_amp - self.gamma_amp)
+            sol = self.kin.solve(h, g, seed=seed)
+            if sol is None:
+                sol = seed if seed else (0.0, 0.0, 0.0)
+            seed = sol
+            for name, v in zip(('theta', 'alpha', 'beta'), sol):
+                seqs[name].append(math.radians(v))
+        return self._accel_stats(seqs, T_REF)
+
+    @staticmethod
+    def _accel_stats(seqs, duration):
+        dt = duration / (len(next(iter(seqs.values()))) - 1)
+        peak, rms = {}, {}
+        for name, s in seqs.items():
+            vel = [(s[i + 1] - s[i]) / dt for i in range(len(s) - 1)]
             acc = [(vel[i + 1] - vel[i]) / dt for i in range(len(vel) - 1)]
-            peak_speed[name] = max(abs(v) for v in vel) if vel else 0.0
-            peak_accel[name] = max(abs(a) for a in acc) if acc else 0.0
-        return peak_speed, peak_accel
+            peak[name] = max((abs(x) for x in acc), default=0.0)
+            rms[name] = math.sqrt(sum(x * x for x in acc) / len(acc)) if acc else 0.0
+        return peak, rms
 
-    def _assess_mode(self, mode):
-        leg_time = self.mode_t[mode]
-        peak_speed, _peak_accel = self._sample_leg_kinematics(leg_time)
+    def _sample_lap(self, duration, n=360):
+        """Per-joint peak speed, peak & rms |accel| of the ellipse over one lap.
 
-        # Max joint speed -> RPM at the joint, then at the motor (x gear_ratio).
-        max_joint_rad_s = max(peak_speed.values())
-        joint_rpm = max_joint_rad_s * 60.0 / (2.0 * math.pi)
-        motor_rpm = joint_rpm * self.gear_ratio
+        Uses the PRECISE root finder, NOT the runtime LUT: the LUT stores
+        tick-quantized angles, and double-differencing that staircase at a fine
+        dt manufactures phantom acceleration spikes. The physically meaningful
+        torque comes from the smooth trajectory (the firmware executes a
+        trapezoidal profile between waypoints, it does not jerk per tick). This
+        is a startup-only computation, so the slow precise solve is fine.
+        """
+        seqs = {'theta': [], 'alpha': [], 'beta': []}
+        seed = self.start_pose
+        for i in range(n + 1):
+            phi = 2.0 * math.pi * i / n
+            h, g = self._ellipse_point(phi)
+            sol = self.kin.solve(h, g, seed=seed) or seed
+            seed = sol
+            for name, v in zip(('theta', 'alpha', 'beta'), sol):
+                seqs[name].append(math.radians(v))
+        dt = duration / n
+        peak_speed = {}
+        for name, s in seqs.items():
+            vel = [(s[i + 1] - s[i]) / dt for i in range(len(s) - 1)]
+            peak_speed[name] = max((abs(x) for x in vel), default=0.0)
+        peak_acc, rms_acc = self._accel_stats(seqs, duration)
+        return peak_speed, peak_acc, rms_acc
 
-        # Torque model anchored at (T_REF -> peak/rms ref).  Gravity term is
-        # T-independent; inertial term scales with 1/T^2 (fixed motion shape).
-        ratio2 = (T_REF / leg_time) ** 2
+    def _assess_lap(self, duration):
+        peak_speed, peak_acc, rms_acc = self._sample_lap(duration)
+        inertia_peak = max(peak_acc[n] / self.ref_peak_accel[n]
+                           for n in peak_acc if self.ref_peak_accel[n] > 1e-9)
+        inertia_rms = max(rms_acc[n] / self.ref_rms_accel[n]
+                          for n in rms_acc if self.ref_rms_accel[n] > 1e-9)
         f = max(0.0, min(1.0, self.gravity_fraction))
-        peak_load = TORQUE_PEAK_REF_NM * (f + (1.0 - f) * ratio2)
-        rms_load = TORQUE_RMS_REF_NM * (f + (1.0 - f) * ratio2)
-        # motor torque = load / gear_ratio (reduction multiplies output torque)
-        peak_motor = peak_load / self.gear_ratio
-        rms_motor = rms_load / self.gear_ratio
+        peak_nm = TORQUE_PEAK_REF_NM * (f + (1.0 - f) * inertia_peak) / self.gear_ratio
+        rms_nm = TORQUE_RMS_REF_NM * (f + (1.0 - f) * inertia_rms) / self.gear_ratio
+        max_joint_rad_s = max(peak_speed.values())
+        motor_rpm = max_joint_rad_s * 60.0 / (2.0 * math.pi) * self.gear_ratio
+        feasible = (peak_nm <= PEAK_TORQUE_LIMIT_NM + 1e-9
+                    and rms_nm <= RMS_TORQUE_LIMIT_NM + 1e-9
+                    and motor_rpm <= MOTOR_NO_LOAD_RPM)
+        return {'duration': duration, 'peak_nm': peak_nm, 'rms_nm': rms_nm,
+                'rpm': motor_rpm, 'inertia_peak': inertia_peak,
+                'inertia_rms': inertia_rms, 'feasible': feasible}
 
-        feasible = (
-            peak_motor <= PEAK_TORQUE_LIMIT_NM + 1e-9
-            and rms_motor <= RMS_TORQUE_LIMIT_NM + 1e-9
-            and motor_rpm <= MOTOR_NO_LOAD_RPM
-        )
-        return {
-            'leg_time': leg_time,
-            'peak_speed_rad_s': peak_speed,
-            'max_rpm': motor_rpm,
-            'peak_nm': peak_motor,
-            'rms_nm': rms_motor,
-            'feasible': feasible,
-        }
+    def _min_feasible_duration(self, assess):
+        """Slowest-limited duration >= requested that passes, using accel ~ 1/T^2.
 
-    def _fastest_feasible(self):
-        # fastest = smallest leg time among feasible modes
-        feas = [m for m in (1, 2, 3) if self.feasibility[m]['feasible']]
-        if not feas:
-            return None
-        return min(feas, key=lambda m: self.mode_t[m])
+        inertia scales as (duration/T)^2, speed as (duration/T); solve each gate
+        for T and take the max. Gravity-only always passes, so this converges.
+        """
+        d0 = assess['duration']
+        f = max(0.0, min(1.0, self.gravity_fraction))
+        needed = [d0]
+        # peak torque gate:  Tpeak_ref*(f + (1-f)*Ip*(d0/T)^2)/gear <= LIMIT
+        for ref, inertia, limit in (
+                (TORQUE_PEAK_REF_NM, assess['inertia_peak'], PEAK_TORQUE_LIMIT_NM),
+                (TORQUE_RMS_REF_NM, assess['inertia_rms'], RMS_TORQUE_LIMIT_NM)):
+            grav = ref * f / self.gear_ratio
+            if limit <= grav:      # gravity alone already exceeds -> infeasible
+                return None
+            coeff = ref * (1.0 - f) * inertia / self.gear_ratio  # * (d0/T)^2
+            if coeff > 1e-12:
+                needed.append(d0 * math.sqrt(coeff / (limit - grav)))
+        # speed gate: rpm0*(d0/T) <= NO_LOAD -> T >= d0*rpm0/NO_LOAD
+        if assess['rpm'] > MOTOR_NO_LOAD_RPM:
+            needed.append(d0 * assess['rpm'] / MOTOR_NO_LOAD_RPM)
+        return max(needed)
 
-    def _log_feasibility(self):
-        self.get_logger().info('=== torque / speed feasibility (per mode) ===')
+    def _plan_laps(self):
+        self.get_logger().info('=== torque / speed feasibility (per lap) ===')
         self.get_logger().info(
             f'  motor: stall {MOTOR_STALL_TORQUE_NM} N.m, rated '
-            f'{MOTOR_RATED_TORQUE_NM} N.m, no-load {MOTOR_NO_LOAD_RPM} RPM | '
-            f'gates: peak<={PEAK_TORQUE_LIMIT_NM:.2f} N.m, rms<={RMS_TORQUE_LIMIT_NM:.2f} N.m')
-        for m in (1, 2, 3):
-            f = self.feasibility[m]
-            verdict = 'PASS' if f['feasible'] else 'FAIL'
+            f'{MOTOR_RATED_TORQUE_NM} N.m, no-load {MOTOR_NO_LOAD_RPM} RPM | gates: '
+            f'peak<={PEAK_TORQUE_LIMIT_NM:.2f} N.m, rms<={RMS_TORQUE_LIMIT_NM:.2f} N.m')
+        planned = []
+        for idx, dur in enumerate(self.lap_durations):
+            a = self._assess_lap(dur)
+            verdict = 'PASS' if a['feasible'] else 'FAIL'
             self.get_logger().info(
-                f'  mode {m} ({MODE_NAME[m]:6s}) leg T={f["leg_time"]:.1f}s: '
-                f'peak {f["peak_nm"]:.2f} N.m ({100*f["peak_nm"]/MOTOR_STALL_TORQUE_NM:.0f}% '
-                f'stall), rms {f["rms_nm"]:.2f} N.m, max {f["max_rpm"]:.1f} RPM -> {verdict}')
-        self.get_logger().info('=============================================')
+                f'  lap {idx + 1} T={dur:.1f}s: inertia x{a["inertia_peak"]:.2f}(pk)'
+                f'/{a["inertia_rms"]:.2f}(rms) -> peak {a["peak_nm"]:.2f} N.m '
+                f'({100 * a["peak_nm"] / MOTOR_STALL_TORQUE_NM:.0f}% stall), rms '
+                f'{a["rms_nm"]:.2f} N.m, {a["rpm"]:.1f} RPM -> {verdict}')
+            if a['feasible']:
+                planned.append(dur)
+                continue
+            slow = self._min_feasible_duration(a)
+            if slow is None:
+                self.get_logger().fatal(
+                    f'Lap {idx + 1} is infeasible at ANY speed (gravity torque alone '
+                    f'exceeds the limit). Refusing. Re-check geometry / gearing.')
+                raise RuntimeError('no feasible duration')
+            slow = math.ceil(slow * 10.0) / 10.0
+            self.get_logger().error(
+                f'  lap {idx + 1} T={dur:.1f}s FAILS the torque gate; slowing to '
+                f'{slow:.1f}s (fastest that passes).')
+            planned.append(slow)
+        self.get_logger().info('============================================')
+        return planned
 
-    # ------------------------------------------------------------- sequencer
+    # ----------------------------------------------------------- sequencer
     def _on_state(self, msg: JointState):
-        state = {}
-        for i, name in enumerate(msg.name):
-            if i < len(msg.position):
-                state[name] = math.degrees(msg.position[i])
-        self.last_state = state
+        self.last_state = {n: math.degrees(msg.position[i])
+                           for i, n in enumerate(msg.name) if i < len(msg.position)}
 
-    def _arrived(self):
-        if self._current_goal_deg is None or self.last_state is None:
-            return False
-        for name, goal in self._current_goal_deg.items():
-            if name not in self.last_state:
-                return False
-            if abs(self.last_state[name] - goal) > self.arrival_tol_deg:
-                return False
-        return True
-
-    def _publish_pose(self, pose_deg, per_joint_speed):
+    def _publish(self, pose_deg, vel_rad_s):
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.name = ['theta', 'alpha', 'beta']
-        msg.position = [math.radians(pose_deg[0]),
-                        math.radians(pose_deg[1]),
+        msg.position = [math.radians(pose_deg[0]), math.radians(pose_deg[1]),
                         math.radians(pose_deg[2])]
-        msg.velocity = [per_joint_speed['theta'],
-                        per_joint_speed['alpha'],
-                        per_joint_speed['beta']]
+        msg.velocity = [vel_rad_s[0], vel_rad_s[1], vel_rad_s[2]]
         self.goal_pub.publish(msg)
-        self._current_goal_deg = {
-            'theta': pose_deg[0], 'alpha': pose_deg[1], 'beta': pose_deg[2]}
+
+    def _clamp_vel(self, v):
+        return max(self.min_vel, min(self.max_vel, v))
 
     def _tick(self):
         if self._finished:
             return
         now = self.get_clock().now()
 
-        # advance to next leg when the previous one is done (arrived or timeout)
-        if self._leg_deadline is None or self._arrived() or now >= self._leg_deadline:
-            self._leg_index += 1
-            if self._leg_index >= len(self._legs):
+        if self._phase_start is None:
+            elapsed = 0.0
+        else:
+            elapsed = (now - self._phase_start).nanoseconds * 1e-9
+
+        # advance phase when the current one is done
+        if self._phase_index < 0 or (
+                self._phase_index < len(self._phases)
+                and elapsed >= self._phases[self._phase_index][1]):
+            self._phase_index += 1
+            if self._phase_index >= len(self._phases):
                 self.get_logger().info('Oscillation sequence complete.')
                 self._finished = True
                 return
-            which, duration = self._legs[self._leg_index]
-            pose = self.pose_start if which == 'start' else self.pose_end
-            # first "start" leg is the creep-to-start; use conservative speeds
-            speeds = self.leg_peak_speed
-            self._publish_pose(pose, speeds)
-            self._leg_deadline = now + rclpy.duration.Duration(seconds=duration)
-            self.get_logger().info(
-                f'Leg {self._leg_index + 1}/{len(self._legs)}: -> {which} pose '
-                f'(<= {duration:.1f} s).')
+            self._phase_start = now
+            elapsed = 0.0
+            kind, dur = self._phases[self._phase_index]
+            if kind == 'creep':
+                self.get_logger().info(
+                    f'Creeping to start pose (theta,alpha,beta)='
+                    f'({self.start_pose[0]:.1f}, {self.start_pose[1]:.1f}, '
+                    f'{self.start_pose[2]:.1f}) deg over <= {dur:.1f}s.')
+            else:
+                lap_no = self._phase_index  # phases[0] is creep
+                self.get_logger().info(
+                    f'Lap {lap_no}/{len(self.lap_plans)}: elliptical loop over '
+                    f'{dur:.1f}s.')
+
+        kind, dur = self._phases[self._phase_index]
+        if kind == 'creep':
+            self._publish(self.start_pose,
+                          (self.creep_vel, self.creep_vel, self.creep_vel))
+            return
+
+        # --- lap: stream the ellipse, velocity from a one-step look-ahead ----
+        t = min(elapsed, dur)
+        phi = 2.0 * math.pi * (t / dur)
+        h, g = self._ellipse_point(phi)
+        sol = self.table.solve_deg(h, g)
+        if sol is None:
+            return
+        phi2 = 2.0 * math.pi * ((t + self._dt_ctrl) / dur)
+        h2, g2 = self._ellipse_point(phi2)
+        nxt = self.table.solve_deg(h2, g2) or sol
+        vel = tuple(self._clamp_vel(abs(math.radians(nxt[j] - sol[j])) / self._dt_ctrl)
+                    for j in range(3))
+        self._publish(sol, vel)
 
 
 def main(args=None):

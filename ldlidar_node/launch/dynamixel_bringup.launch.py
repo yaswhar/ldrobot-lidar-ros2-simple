@@ -6,8 +6,8 @@ Convenience for bench testing. The two nodes remain SEPARATE processes coupled
 only by the /joint_goal topic -- this file just starts both. Swapping the
 planner for a lidar_planner_node later needs no change to the actuator.
 
-    ros2 launch ldlidar_node dynamixel_bringup.launch.py mode:=2
-    ros2 launch ldlidar_node dynamixel_bringup.launch.py mode:=3 repeat:=3 \
+    ros2 launch ldlidar_node dynamixel_bringup.launch.py
+    ros2 launch ldlidar_node dynamixel_bringup.launch.py \
         actuator_params_file:=/mnt/host_desktop/dynamixel_actuator_param.yaml \
         planner_params_file:=/mnt/host_desktop/oscillation_planner_param.yaml
 """
@@ -19,7 +19,6 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, TimerAction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -33,16 +32,9 @@ def generate_launch_description():
     declare_planner_params = DeclareLaunchArgument(
         'planner_params_file', default_value=planner_default,
         description='oscillation_planner params YAML')
-    declare_mode = DeclareLaunchArgument(
-        'mode', default_value='2',
-        description='Speed mode: 1=slow(6.0s) 2=normal(4.5s) 3=fast(3.0s)')
-    declare_repeat = DeclareLaunchArgument(
-        'repeat', default_value='1', description='Number of full round trips')
 
     actuator_params = LaunchConfiguration('actuator_params_file')
     planner_params = LaunchConfiguration('planner_params_file')
-    mode = LaunchConfiguration('mode')
-    repeat = LaunchConfiguration('repeat')
 
     actuator_node = Node(
         package='ldlidar_node',
@@ -56,10 +48,7 @@ def generate_launch_description():
         executable='oscillation_planner_node.py',
         name='oscillation_planner',
         output='screen',
-        parameters=[planner_params, {
-            'mode': ParameterValue(mode, value_type=int),
-            'repeat': ParameterValue(repeat, value_type=int),
-        }])
+        parameters=[planner_params])
 
     # Start the planner a couple of seconds after the actuator so the actuator
     # is subscribed and ready before the first /joint_goal is published.
@@ -68,8 +57,6 @@ def generate_launch_description():
     ld = LaunchDescription()
     ld.add_action(declare_actuator_params)
     ld.add_action(declare_planner_params)
-    ld.add_action(declare_mode)
-    ld.add_action(declare_repeat)
     ld.add_action(actuator_node)
     ld.add_action(delayed_planner)
     return ld

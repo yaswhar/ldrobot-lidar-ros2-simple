@@ -85,11 +85,16 @@ install(PROGRAMS
 )
 
 # Install DYNAMIXEL platform nodes + utilities (decoupled from the lidar code).
-# Two nodes (actuator hardware-layer + oscillation planner) plus discovery and
-# calibration CLIs. See ldlidar_node/dynamixel/README.md.
+# Two nodes (actuator hardware-layer + oscillation planner), a shared kinematics
+# module, the offline IK lookup-table builder, plus discovery and calibration
+# CLIs. platform_kinematics.py and generate_ik_lut.py are imported as sibling
+# modules by the planner node, so they must install to the SAME directory.
+# See ldlidar_node/dynamixel/README.md.
 install(PROGRAMS
   dynamixel/dynamixel_actuator_node.py
   dynamixel/oscillation_planner_node.py
+  dynamixel/platform_kinematics.py
+  dynamixel/generate_ik_lut.py
   dynamixel/find_servos.py
   dynamixel/dynamixel_calibrate.py
   DESTINATION lib/${PROJECT_NAME}
