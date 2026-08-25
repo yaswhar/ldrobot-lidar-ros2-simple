@@ -171,8 +171,20 @@ is why a naive 6.0 s lap trips the gate and 7.0 s is the fast default.
 ## Safety (actuator, independent of the planner)
 
 - Per-logical-joint **soft angle limits** clamp every goal (backstop).
-- Independent **current-based cutoff**: GroupSyncRead Present Current →
-  torque-disable + latch fault if it exceeds `current_limit_ma`.
+- Independent **overload cutoff**: GroupSyncRead of reg 126 → torque-disable +
+  latch fault if it exceeds `current_limit_ma`. **Caveat (2026-08-25):** on the
+  XC430-W150-T reg 126 is **Present Load** (0.1 %/unit, ±100 %), **not** Present
+  Current — this motor has no current sensor (e-manual verified). The legacy
+  code scales it by 2.69 mA/unit, so today's `current_limit_ma=1200` really trips
+  at **44.6 % load** (446 units), and the two field faults at "1350–1400 mA" were
+  actually **~50–52 % load** — normal working load, not a stall. Every state
+  cycle now logs the **raw reg 126 integer** for all 4 motors with both readings
+  (`% load` and `mA-if-current`) so a hardware run gives ground truth; the trip
+  message prints the raw value + real % load too. Pending that confirmation, the
+  cutoff is expected to migrate to a `load_limit_pct` parameter. Also: addr 38
+  (`ADDR_CURRENT_LIMIT`) is a **reserved gap** on this motor — the startup
+  "current limit" write is a firmware no-op, so the only firmware output cap is
+  the default **PWM Limit(36)**.
 - **Torque-disable** on SIGINT/SIGTERM and on any current fault.
 - **Creep** slowly to the first commanded pose (`creep_profile_velocity_rad_s`).
 - **Revolution-safety check** at startup: reads Present Position and, if it sits

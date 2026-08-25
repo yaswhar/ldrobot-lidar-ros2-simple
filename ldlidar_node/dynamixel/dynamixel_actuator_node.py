@@ -71,18 +71,29 @@ except ImportError:  # pragma: no cover - handled at runtime with a clear messag
 # =============================================================================
 # XC430-W150-T CONTROL TABLE  (Protocol 2.0, ROBOTIS X-series)
 # -----------------------------------------------------------------------------
-# Addresses/units below are the X-series common control table, cross-checked
-# against the XC430-W150-T e-manual.  VERIFY against the official e-manual if you
-# swap motor models:  https://emanual.robotis.com/docs/en/dxl/x/xc430-w150/
+# VERIFIED against the official e-manual 2026-08-25:
+#     https://emanual.robotis.com/docs/en/dxl/x/xc430-w150/
+# CRITICAL: this is an ENTRY-level X-series motor with NO current sensor. It does
+# NOT share the XM/XH current-sensing table. In particular:
+#   * addr 126 is PRESENT LOAD (0.1 %/unit, signed, +-1000 == +-100 %), NOT
+#     Present Current. There is NO Present Current register on this motor.
+#   * there is NO Current Limit register. Addr 38 is a RESERVED GAP here (it is
+#     Current Limit only on the XM/XH series). The one firmware output cap is
+#     PWM Limit(36). See _configure_motors + _publish_state.
+# The old code mislabeled 126 as Present Current and scaled it by 2.69 mA/unit;
+# read reg 126 as Present Load (0.1 %) instead.
 # =============================================================================
 ADDR_OPERATING_MODE = 11      # EEPROM, 1 byte
 ADDR_HOMING_OFFSET = 20       # EEPROM, 4 bytes (signed) -- calibration zero
-ADDR_CURRENT_LIMIT = 38       # EEPROM, 2 bytes (unit 2.69 mA)
+ADDR_PWM_LIMIT = 36           # EEPROM, 2 bytes (unit 0.113 %) -- the REAL output cap
+ADDR_CURRENT_LIMIT = 38       # RESERVED GAP on XC430 (Current Limit only on XM/XH):
+                              # reads/writes here set NO limit on this motor.
 ADDR_TORQUE_ENABLE = 64       # RAM,    1 byte
 ADDR_PROFILE_ACCEL = 108      # RAM,    4 bytes (unit 214.577 rev/min^2)
 ADDR_PROFILE_VELOCITY = 112   # RAM,    4 bytes (unit 0.229 rev/min)
 ADDR_GOAL_POSITION = 116      # RAM,    4 bytes (pulse, SIGNED in extended mode)
-ADDR_PRESENT_CURRENT = 126    # RAM,    2 bytes (unit 2.69 mA, signed)
+ADDR_PRESENT_LOAD = 126       # RAM,    2 bytes (PRESENT LOAD, 0.1 %/unit, signed).
+                              # NOT Present Current -- no current sensor on XC430.
 ADDR_PRESENT_VELOCITY = 128   # RAM,    4 bytes (unit 0.229 rev/min, signed)
 ADDR_PRESENT_POSITION = 132   # RAM,    4 bytes (pulse, signed multi-turn)
 
@@ -92,9 +103,9 @@ ADDR_PRESENT_POSITION = 132   # RAM,    4 bytes (pulse, signed multi-turn)
 ADDR_GOAL_BLOCK = ADDR_PROFILE_ACCEL
 LEN_GOAL_BLOCK = 12
 
-# One contiguous read block: PresentCurrent(126..127) PresentVelocity(128..131)
+# One contiguous read block: PresentLoad(126..127) PresentVelocity(128..131)
 # PresentPosition(132..135) = 10 bytes -> a single GroupSyncRead per cycle.
-ADDR_STATE_BLOCK = ADDR_PRESENT_CURRENT
+ADDR_STATE_BLOCK = ADDR_PRESENT_LOAD
 LEN_STATE_BLOCK = 10
 
 # X-series Operating Modes: 3 = Position (single-turn 0..4095),
@@ -107,7 +118,11 @@ TORQUE_DISABLE = 0
 # X-series conversion constants
 TICKS_PER_REV = 4096
 DEG_PER_TICK = 360.0 / TICKS_PER_REV       # 0.088 deg/pulse
-CURRENT_UNIT_MA = 2.69                      # mA per Present/Goal Current unit
+CURRENT_UNIT_MA = 2.69                      # LEGACY: mA/unit -- valid ONLY for XM/XH
+                                            # Present Current. This motor has none;
+                                            # kept only to show the mA-if-current
+                                            # interpretation alongside the raw log.
+LOAD_UNIT_PCT = 0.1                         # % per Present Load unit (reg 126, XC430)
 VELOCITY_UNIT_RPM = 0.229                   # rev/min per velocity unit
 ACCEL_UNIT_RPM2 = 214.577                   # rev/min^2 per accel unit
 
@@ -273,6 +288,7 @@ class DynamixelActuatorNode(Node):
         self.first_goal_received = False   # first goal -> creep behaviour
         self.fault_latched = False
         self._current_over_count = {m.id: 0 for m in self.all_motors}
+        self._reg_peak = {m.id: 0 for m in self.all_motors}  # peak |reg[126]| seen
         self._observed_dirty = False       # observed envelope grew -> re-log
 
         # These two are pure calculation -- log them BEFORE touching hardware so
@@ -449,8 +465,15 @@ class DynamixelActuatorNode(Node):
         return ok
 
     def _configure_motors(self):
-        """Set Extended Position Control Mode + current limit. Read-before-write
-        to spare EEPROM. NEVER touches Homing Offset (that IS the calibration)."""
+        """Set Extended Position Control Mode. Read-before-write to spare EEPROM.
+        NEVER touches Homing Offset (that IS the calibration).
+
+        WARNING: ADDR_CURRENT_LIMIT (38) is a RESERVED GAP on the XC430 -- this
+        motor has no Current Limit register, so the write below sets NO firmware
+        limit (the packet is rejected/ignored). The only firmware output cap is
+        the default PWM Limit(36). Left in place pending the raw-log review; the
+        only effective cutoff today is the software check in _publish_state, which
+        reads Present Load (reg 126), not current."""
         current_limit_units = int(round(self.current_limit_ma / CURRENT_UNIT_MA))
         for m in self.all_motors:
             mode = self._read1(m.id, ADDR_OPERATING_MODE)
@@ -467,8 +490,10 @@ class DynamixelActuatorNode(Node):
             self._write1(m.id, ADDR_TORQUE_ENABLE, TORQUE_ENABLE)
         self.get_logger().info(
             f'Motors set to EXTENDED Position Control Mode (op mode '
-            f'{OP_MODE_EXTENDED_POSITION}), current limit {self.current_limit_ma:.0f} '
-            f'mA ({current_limit_units} units), torque ON.')
+            f'{OP_MODE_EXTENDED_POSITION}), torque ON. NOTE: addr 38 is a reserved '
+            f'gap on the XC430 (no Current Limit register), so NO firmware current '
+            f'limit was set -- the only firmware output cap is the default '
+            f'PWM Limit(36). The active cutoff is the software Present-Load check.')
 
     def _check_present_positions(self):
         """Read Present Position on all motors before any move. If a reading sits
@@ -615,30 +640,53 @@ class DynamixelActuatorNode(Node):
             return
 
         raw = {}  # id -> (pos_deg_logical, vel_rad_s_logical, current_ma_signed)
+        reg_load = {}  # id -> raw reg[126] signed int (Present Load units, 0.1 %)
         over_limit_ids = []
         for m in self.all_motors:
             if not self.group_read.isAvailable(m.id, ADDR_STATE_BLOCK, LEN_STATE_BLOCK):
                 self.get_logger().warn(
                     f'No state data for ID {m.id}', throttle_duration_sec=2.0)
                 return
-            cur = _to_signed(
-                self.group_read.getData(m.id, ADDR_PRESENT_CURRENT, 2), 16)
+            # reg[126] is PRESENT LOAD on the XC430 (0.1 %/unit), NOT Present
+            # Current. Keep the raw signed integer so BOTH interpretations
+            # (real % load vs. the legacy mA-if-current) stay visible in the log.
+            load_raw = _to_signed(
+                self.group_read.getData(m.id, ADDR_PRESENT_LOAD, 2), 16)
             vel = _to_signed(
                 self.group_read.getData(m.id, ADDR_PRESENT_VELOCITY, 4), 32)
             pos = _to_signed(
                 self.group_read.getData(m.id, ADDR_PRESENT_POSITION, 4), 32)
 
-            current_ma = cur * CURRENT_UNIT_MA
+            # LEGACY interpretation, kept ONLY to drive the existing cutoff
+            # comparison + the /joint_states effort field unchanged for now.
+            # The register is really load, so this "mA" is fictitious.
+            current_ma = load_raw * CURRENT_UNIT_MA
             vel_rad_s = m.direction * (vel * VELOCITY_UNIT_RPM) * 2.0 * math.pi / 60.0
             pos_deg = m.ticks_to_angle_deg(pos)
             raw[m.id] = (pos_deg, vel_rad_s, current_ma)
+            reg_load[m.id] = load_raw
+            self._reg_peak[m.id] = max(self._reg_peak[m.id], abs(load_raw))
 
             if abs(current_ma) > self.current_limit_ma:
                 self._current_over_count[m.id] += 1
                 if self._current_over_count[m.id] >= self.current_fault_persist:
-                    over_limit_ids.append((m.id, current_ma))
+                    over_limit_ids.append((m.id, load_raw, current_ma))
             else:
                 self._current_over_count[m.id] = 0
+
+        # GROUND-TRUTH raw log: reg[126] as the raw signed integer plus BOTH
+        # interpretations for all 4 motors, so a hardware run tells us which unit
+        # is real (Present Load % vs. legacy mA-if-current). '[pk N]' is the peak
+        # |raw| since node start, so throttling can never hide the true peak.
+        # Throttled (0.5 s) so it does not flood at the 20 Hz state rate.
+        snap = '  '.join(
+            f'ID{mid}={reg_load[mid]:+d}'
+            f'({reg_load[mid] * LOAD_UNIT_PCT:+.1f}%|{reg_load[mid] * CURRENT_UNIT_MA:+.0f}mA)'
+            f'[pk{self._reg_peak[mid]}]'
+            for mid in reg_load)
+        self.get_logger().info(
+            f'reg[126] raw [Present Load 0.1%/unit; mA-if-current also shown]: {snap}',
+            throttle_duration_sec=0.5)
 
         if over_limit_ids:
             self._trip_current_fault(over_limit_ids)
@@ -656,9 +704,15 @@ class DynamixelActuatorNode(Node):
 
     def _trip_current_fault(self, over_limit_ids):
         self.fault_latched = True
-        detail = ', '.join(f'ID{i}={c:.0f}mA' for i, c in over_limit_ids)
+        detail = ', '.join(
+            f'ID{i}: reg={r:+d} -> {r * LOAD_UNIT_PCT:+.1f}% load '
+            f'({c:+.0f} mA if it were current)'
+            for i, r, c in over_limit_ids)
+        thr_units = self.current_limit_ma / CURRENT_UNIT_MA
         self.get_logger().error(
-            f'CURRENT LIMIT EXCEEDED ({detail}) > {self.current_limit_ma:.0f} mA. '
+            f'CUTOFF TRIPPED [{detail}]. NB reg[126] is PRESENT LOAD on the XC430, '
+            f'not current. Legacy threshold current_limit_ma={self.current_limit_ma:.0f} '
+            f'mA == {thr_units:.0f} reg units == {thr_units * LOAD_UNIT_PCT:.1f}% load. '
             f'Torque DISABLED on all motors. Fault latched -- restart to recover.')
         self.disable_torque_all()
 
