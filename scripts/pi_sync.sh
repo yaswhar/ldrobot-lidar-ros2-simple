@@ -77,10 +77,11 @@ docker exec "$DEV" bash -lc "
   fi
   echo '   HEAD:' \$(git rev-parse HEAD)
   git log --oneline -1
-  python3 -c 'import dynamixel_sdk, yaml, numpy' && echo '   deps ok'
   chmod +x ldlidar_node/dynamixel/*.py
   cd /root/ros2_ws
-  source /opt/ros/humble/setup.bash
+  source /opt/ros/humble/setup.bash            # puts ros-humble-dynamixel-sdk on the Python path
+  python3 -c 'import dynamixel_sdk, yaml, numpy' && echo '   deps ok' \
+    || { echo '   ERROR: dynamixel_sdk / yaml / numpy not importable with ROS sourced'; exit 1; }
   colcon build --packages-select ldlidar_node 2>&1 | grep -E 'Starting|Finished|Failed|error|Summary'
   source install/setup.bash
   grep -q 'gear:' \$(ros2 pkg prefix ldlidar_node)/share/ldlidar_node/params/dynamixel_actuator.yaml \
