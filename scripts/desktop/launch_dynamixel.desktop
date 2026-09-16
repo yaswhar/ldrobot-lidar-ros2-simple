@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Launch Dynamixel
+Comment=Launch mechanism oscillation (actuator + planner)
+Exec=/home/mohammad/Desktop/run_dynamixel.sh
+Icon=utilities-terminal
+Terminal=true
+Categories=Utility;

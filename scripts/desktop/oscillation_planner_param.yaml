@@ -1,4 +1,6 @@
-# ldlidar_node/params/oscillation_planner.yaml
+# /home/mohammad/Desktop/oscillation_planner_param.yaml
+# (desktop copy of ldlidar_node/params/oscillation_planner.yaml -- edit here, no
+#  rebuild needed; run_dynamixel.sh passes it as planner_params_file:=)
 #
 # MOTION-PLANNING config for oscillation_planner_node.
 # Owns: mechanism geometry, elliptical trajectory, IK lookup-table grid, per-lap
@@ -44,7 +46,7 @@
     # (diagnostics/gear_check.py). A lap that fails is auto-slowed (loud warning)
     # to the fastest duration that passes; one whose STATIC holding torque alone
     # fails is refused outright.
-    lap_durations_s: [12.0, 9.0, 7.0]
+    lap_durations_s: [30.0, 30.0, 30.0]   # desktop: the slow 30 s laps you were running; package default is [12, 9, 7]
 
     # --- inverse-kinematics lookup table (step 3) ---
     # Built OFFLINE by generate_ik_lut.py (or on first node startup) and cached to

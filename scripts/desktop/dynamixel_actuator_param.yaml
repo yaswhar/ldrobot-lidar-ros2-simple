@@ -1,4 +1,6 @@
-# ldlidar_node/params/dynamixel_actuator.yaml
+# /home/mohammad/Desktop/dynamixel_actuator_param.yaml
+# (desktop copy of ldlidar_node/params/dynamixel_actuator.yaml -- edit here, no
+#  rebuild needed; run_dynamixel.sh passes it as actuator_params_file:=)
 #
 # HARDWARE-LAYER config for dynamixel_actuator_node.
 # Owns: port, baud, logical->physical motor mapping (id/direction), the GEARBOX

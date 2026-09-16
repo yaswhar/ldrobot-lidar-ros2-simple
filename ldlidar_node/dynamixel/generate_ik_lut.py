@@ -26,17 +26,23 @@ height. So the table never claims an angle the hardware can't hit, and we can
 report exactly how far the quantized table drifts from the ideal (sub-mm here).
 
 Encoder quantization is direction/offset INDEPENDENT: the set of reachable
-physical angles is the lattice {n * 360/4096 deg}; a motor's Homing Offset and
-direction only relabel which integer n a given angle maps to, never the spacing.
-So quantizing needs ONLY the published XC430 encoder resolution (4096 ticks/rev)
--- no motor IDs, no calibration, no dynamixel_sdk. The planner/actuator boundary
-is preserved: nothing hardware-specific leaks into the planner.
+JOINT angles is the lattice {n * 360/(4096 * gear_ratio) deg}; a motor's Homing
+Offset, direction and the gearbox sign only relabel which integer n a given
+angle maps to, never the spacing. So quantizing needs ONLY the published XC430
+encoder resolution (4096 ticks/rev) and the reduction ratio -- no motor IDs, no
+calibration, no dynamixel_sdk. The planner/actuator boundary is preserved.
+
+With the 7:1 cycloid (2026-09) the joint-side lattice is 28672 ticks/rev =
+0.01256 deg, 7x finer than direct drive. Tilt resolution at d = 0.10 is
+~0.66 deg/mm of leg error, so this is a real accuracy win, not cosmetics. The
+cache signature includes the ratio, so a table built for another ratio is
+rebuilt rather than silently reused.
 
 Usage:
     ros2 run ldlidar_node generate_ik_lut.py \
         --params $(ros2 pkg prefix ldlidar_node)/share/ldlidar_node/params/oscillation_planner.yaml \
         --out ~/.cache/ldlidar_platform/ik_lut.npz
-    ./generate_ik_lut.py --a 0.11 --b 0.44 --c 0.77 --d 0.10 --benchmark
+    ./generate_ik_lut.py --a 0.11 --b 0.44 --c 0.77 --d 0.10 --gear-ratio 7 --benchmark
 """
 
 import argparse
@@ -54,31 +60,41 @@ except ImportError:  # allow running from an arbitrary cwd
 
 # --- encoder resolution (published XC430-W150-T spec; NOT motor calibration) ---
 TICKS_PER_REV = 4096
-DEG_PER_TICK = 360.0 / TICKS_PER_REV        # ~0.08789 deg
-LUT_FORMAT_VERSION = 2
+DEG_PER_TICK = 360.0 / TICKS_PER_REV        # ~0.08789 deg at the MOTOR
+LUT_FORMAT_VERSION = 3                      # v3: gear_ratio in the lattice + signature
 
 
-def quantize_angle_deg(angle_deg):
-    """Round to the nearest angle the encoder lattice can hold (0.088 deg grid).
-    Direction/offset independent -- see module docstring."""
-    return round(angle_deg / DEG_PER_TICK) * DEG_PER_TICK
+def joint_deg_per_tick(gear_ratio=1.0):
+    """JOINT-side lattice spacing: one motor tick through the reducer."""
+    return DEG_PER_TICK / float(gear_ratio)
+
+
+def quantize_angle_deg(angle_deg, gear_ratio=1.0):
+    """Round to the nearest JOINT angle the encoder lattice can hold
+    (0.088 deg grid at 1:1, 0.0126 deg at 7:1). Direction/offset independent."""
+    step = joint_deg_per_tick(gear_ratio)
+    return round(angle_deg / step) * step
 
 
 def _signature(a, b, c, d, h_step_m, gamma_step_deg, gamma_amp_deg,
-               lo_deg, hi_deg):
+               lo_deg, hi_deg, gear_ratio=1.0):
     """Stable fingerprint of the generation params; used to detect a stale cache."""
     return np.array([LUT_FORMAT_VERSION, a, b, c, d, h_step_m, gamma_step_deg,
-                     gamma_amp_deg, lo_deg, hi_deg, TICKS_PER_REV], dtype=np.float64)
+                     gamma_amp_deg, lo_deg, hi_deg, TICKS_PER_REV, float(gear_ratio)],
+                    dtype=np.float64)
 
 
 def build_lut(a, b, c, d, h_step_m=0.005, gamma_step_deg=1.0,
-              gamma_amp_deg=30.0, lo_deg=0.0, hi_deg=90.0, log=print):
+              gamma_amp_deg=30.0, lo_deg=0.0, hi_deg=90.0, log=print,
+              gear_ratio=1.0):
     """Build the IK LUT. Returns a dict of numpy arrays + metadata.
 
     h grid spans the achievable central-h range; gamma grid spans
-    [-gamma_amp, +gamma_amp]. Unreachable cells are NaN.
+    [-gamma_amp, +gamma_amp]. Unreachable cells are NaN. Angles are quantized
+    onto the JOINT-side encoder lattice for `gear_ratio`.
     """
     kin = PlatformKinematics(a, b, c, d)
+    gear_ratio = float(gear_ratio)
 
     h_lo, h_hi = kin.achievable_center_h_range(lo_deg, hi_deg)
     if h_lo is None:
@@ -95,7 +111,9 @@ def build_lut(a, b, c, d, h_step_m=0.005, gamma_step_deg=1.0,
 
     log(f'  building LUT: {n_h} h-steps [{g_lo:.3f}..{g_hi:.3f} m @ '
         f'{h_step_m*1000:.0f} mm], {n_g} gamma-steps '
-        f'[{-gamma_amp_deg:.0f}..{gamma_amp_deg:.0f} deg @ {gamma_step_deg:.0f} deg]')
+        f'[{-gamma_amp_deg:.0f}..{gamma_amp_deg:.0f} deg @ {gamma_step_deg:.0f} deg], '
+        f'joint lattice {joint_deg_per_tick(gear_ratio):.5f} deg/tick '
+        f'(gear {gear_ratio:g}:1)')
 
     theta_angle = np.full(n_h, np.nan)
     theta_h_actual = np.full(n_h, np.nan)
@@ -111,7 +129,7 @@ def build_lut(a, b, c, d, h_step_m=0.005, gamma_step_deg=1.0,
         if th is None:
             continue
         seed = th
-        th_q = quantize_angle_deg(th)
+        th_q = quantize_angle_deg(th, gear_ratio)
         theta_angle[i] = th_q
         theta_h_actual[i] = kin.h_center(th_q)
 
@@ -128,12 +146,12 @@ def build_lut(a, b, c, d, h_step_m=0.005, gamma_step_deg=1.0,
                                 lo_deg=lo_deg, hi_deg=hi_deg)
             if al is not None:
                 seed_a = al
-                al_q = quantize_angle_deg(al)
+                al_q = quantize_angle_deg(al, gear_ratio)
                 alpha_angle[i, j] = al_q
                 alpha_h_actual[i, j] = kin.h_side(al_q, float(g))
             if be is not None:
                 seed_b = be
-                be_q = quantize_angle_deg(be)
+                be_q = quantize_angle_deg(be, gear_ratio)
                 beta_angle[i, j] = be_q
                 beta_h_actual[i, j] = kin.h_side(be_q, float(g))
             if al is not None and be is not None:
@@ -161,8 +179,9 @@ def build_lut(a, b, c, d, h_step_m=0.005, gamma_step_deg=1.0,
 
     return {
         'signature': _signature(a, b, c, d, h_step_m, gamma_step_deg,
-                                gamma_amp_deg, lo_deg, hi_deg),
+                                gamma_amp_deg, lo_deg, hi_deg, gear_ratio),
         'geometry': np.array([a, b, c, d], dtype=np.float64),
+        'gear_ratio': np.array([gear_ratio], dtype=np.float64),
         'h_grid': h_grid,
         'gamma_grid': gamma_grid,
         'theta_angle': theta_angle,
@@ -188,9 +207,9 @@ def load_lut(path):
 
 
 def signature_matches(lut, a, b, c, d, h_step_m, gamma_step_deg,
-                      gamma_amp_deg, lo_deg, hi_deg):
+                      gamma_amp_deg, lo_deg, hi_deg, gear_ratio=1.0):
     want = _signature(a, b, c, d, h_step_m, gamma_step_deg, gamma_amp_deg,
-                      lo_deg, hi_deg)
+                      lo_deg, hi_deg, gear_ratio)
     have = lut.get('signature')
     return have is not None and have.shape == want.shape and np.allclose(have, want)
 
@@ -299,11 +318,13 @@ def _extract_geometry(params_path):
     p = node.get('ros__parameters', node) if isinstance(node, dict) else {}
     geo = p.get('geometry', {}) or {}
     lut = p.get('lut', {}) or {}
+    gear = p.get('gear', {}) or {}
     return (float(geo.get('a', 0.11)), float(geo.get('b', 0.44)),
             float(geo.get('c', 0.77)), float(geo.get('d', 0.10)),
             float(lut.get('h_step_m', 0.005)),
             float(lut.get('gamma_step_deg', 1.0)),
-            float(lut.get('gamma_amp_deg', 30.0)))
+            float(lut.get('gamma_amp_deg', 30.0)),
+            float(gear.get('ratio', 1.0)))
 
 
 def main():
@@ -316,19 +337,24 @@ def main():
     ap.add_argument('--h-step', type=float, default=0.005, help='h grid step [m]')
     ap.add_argument('--gamma-step', type=float, default=1.0, help='gamma step [deg]')
     ap.add_argument('--gamma-amp', type=float, default=30.0, help='gamma amp [deg]')
+    ap.add_argument('--gear-ratio', type=float, default=1.0,
+                    help='motor:joint reduction (7.0 for the fitted cycloid); sets '
+                         'the joint-side encoder lattice')
     ap.add_argument('--out', default='~/.cache/ldlidar_platform/ik_lut.npz')
     ap.add_argument('--benchmark', action='store_true',
                     help='measure per-lookup latency after building')
     args = ap.parse_args()
 
     if args.params:
-        a, b, c, d, h_step, g_step, g_amp = _extract_geometry(args.params)
+        a, b, c, d, h_step, g_step, g_amp, gear_ratio = _extract_geometry(args.params)
     else:
         a, b, c, d = args.a, args.b, args.c, args.d
         h_step, g_step, g_amp = args.h_step, args.gamma_step, args.gamma_amp
+        gear_ratio = args.gear_ratio
 
-    print(f'Geometry a={a} b={b} c={c} d={d}')
-    lut = build_lut(a, b, c, d, h_step, g_step, g_amp)
+    print(f'Geometry a={a} b={b} c={c} d={d}; gear ratio {gear_ratio:g}:1 '
+          f'(joint lattice {joint_deg_per_tick(gear_ratio):.5f} deg)')
+    lut = build_lut(a, b, c, d, h_step, g_step, g_amp, gear_ratio=gear_ratio)
     path = save_lut(lut, args.out)
     size_kb = os.path.getsize(path) / 1024.0
     print(f'\nTable sizes:')

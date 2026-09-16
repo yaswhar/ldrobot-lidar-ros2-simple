@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Calibrate Dynamixel
+Comment=Motor-driven homing of the 4 servos (run after fitting the gearboxes)
+Exec=/home/mohammad/Desktop/calibrate_dynamixel.sh
+Icon=utilities-terminal
+Terminal=true
+Categories=Utility;
