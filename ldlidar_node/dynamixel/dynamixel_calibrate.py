@@ -91,6 +91,7 @@ HOMING_OFFSET_RANGE = 1_044_479
 EXT_POSITION_RANGE = 1_048_575
 POSE_FILE_DEFAULT = '~/.cache/ldlidar_platform/last_pose.yaml'
 JOINTS = ('theta', 'alpha', 'beta')
+STALL_JOINT_DEG = 0.75           # residual above this after a jog = the joint did not get there
 
 
 def _s32(v):
@@ -233,7 +234,14 @@ class Bus:
 
     # --- motion ---
     def jog(self, joints_deg):
-        """joints_deg: {joint: delta_deg}. Both theta motors move together."""
+        """joints_deg: {joint: delta_deg}. Both theta motors move together.
+
+        "Settled" = every motor is within 3 ticks of its goal OR has stopped
+        moving. The XC430 position loop is P-only by default (I gain 0), so under
+        load it parks a few ticks short of the goal; that residual is reported,
+        not treated as a fault. Only a residual above STALL_JOINT_DEG (a joint
+        that really did not get there) or a Present Load above the abort
+        threshold fails the jog."""
         goals = {}
         for n, ddeg in joints_deg.items():
             if abs(ddeg) < 1e-9:
@@ -244,33 +252,48 @@ class Bus:
                 self.last_dir[mid] = 1 if ddeg > 0 else -1
         if not goals:
             return True
+        max_ticks = max(abs(g - self.present(mid)) for mid, g in goals.items())
         for mid, g in goals.items():
             self.w4(mid, ADDR_GOAL_POSITION, g)
-        max_ticks = max(abs(g - self.present(mid)) for mid, g in goals.items())
         ticks_per_s = self.speed * self.cfg.ratio / (2.0 * math.pi) * TICKS_PER_REV
-        deadline = time.monotonic() + max_ticks / max(1.0, ticks_per_s) + 2.0
-        ok = True
+        deadline = time.monotonic() + max_ticks / max(1.0, ticks_per_s) + 3.0
+        stall_ticks = max(20, int(round(STALL_JOINT_DEG * self.cfg.ratio / DEG_PER_TICK)))
+        last = {mid: None for mid in goals}
+        still = 0
         while time.monotonic() < deadline:
             time.sleep(0.05)
-            worst = 0.0
             for mid in goals:
                 lp = self.load_pct(mid)
-                worst = max(worst, abs(lp))
                 if abs(lp) > self.load_abort:
-                    # stop everything where it is
-                    for m2 in goals:
+                    for m2 in goals:                       # stop everything where it is
                         self.w4(m2, ADDR_GOAL_POSITION, self.present(m2))
                     print(f'  !! ID{mid} load {lp:+.1f} % > {self.load_abort:.0f} % -- jog ABORTED. '
                           f'If this is a theta motor, IDs 1/2 may be fighting (one direction '
                           f'or gear.reversing wrong) or a joint is at a mechanical stop.')
                     return False
-            if all(abs(self.present(mid) - g) <= 3 for mid, g in goals.items()):
+            now = {mid: self.present(mid) for mid in goals}
+            if all(abs(now[mid] - g) <= 3 for mid, g in goals.items()):
                 break
-        else:
-            ok = False
-            print('  !! jog did not settle in time (still moving / stalled?)')
+            if all(last[mid] is not None and abs(now[mid] - last[mid]) <= 1 for mid in goals):
+                still += 1
+                if still >= 6:                              # stopped for 0.3 s
+                    break
+            else:
+                still = 0
+            last = now
+        ok = True
         for mid, g in goals.items():
-            print(f'  ID{mid}: present {self.present(mid)} (goal {g}), load {self.load_pct(mid):+.1f} %')
+            p = self.present(mid)
+            res = p - g
+            note = ''
+            if abs(res) > stall_ticks:
+                ok = False
+                note = f'  <-- STALLED ({abs(res) * DEG_PER_TICK / self.cfg.ratio:.2f} joint deg short)'
+            elif abs(res) > 3:
+                note = f'  (steady-state error {abs(res)} ticks = {abs(res) * DEG_PER_TICK / self.cfg.ratio:.2f} joint deg; P-only servo under load, normal)'
+            print(f'  ID{mid}: present {p} (goal {g}), load {self.load_pct(mid):+.1f} %{note}')
+        if not ok:
+            print('  !! a joint did not reach its goal -- mechanical stop, fighting theta pair, or wrong sign.')
         return ok
 
     def status(self, homed=None):
