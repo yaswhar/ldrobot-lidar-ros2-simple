@@ -101,6 +101,15 @@ for f in "$TMP"/*; do
 done
 chmod +x "$DESKTOP"/*.sh "$DESKTOP"/*.desktop
 rm -rf "$TMP"
+# redundant files: keep only this run's backups; drop hand-made launchers that
+# duplicate launch_dynamixel.desktop (same Exec target)
+find "$DESKTOP" -maxdepth 1 -name '*.bak-*' ! -name "*.bak-$STAMP" -print -delete | sed 's|.*/|   removed old backup |'
+for f in "$DESKTOP"/*.desktop; do
+  case "$(basename "$f")" in launch_dynamixel.desktop|calibrate_dynamixel.desktop) continue ;; esac
+  if grep -q 'Exec=.*run_dynamixel.sh' "$f" 2>/dev/null; then
+    echo "   removed duplicate launcher $(basename "$f")"; rm -f "$f"
+  fi
+done
 ls -1 "$DESKTOP" | grep -E 'dynamixel|oscillation' | sed 's/^/   /'
 
 say "6. docker commit $DEV -> $IMAGE"

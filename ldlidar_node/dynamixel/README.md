@@ -222,9 +222,10 @@ ros2 run ldlidar_node find_servos.py --port /dev/ttyUSB0
 ros2 run ldlidar_node dynamixel_calibrate.py \
     --params $(ros2 pkg prefix ldlidar_node)/share/ldlidar_node/params/dynamixel_actuator.yaml \
     --planner-params $(ros2 pkg prefix ldlidar_node)/share/ldlidar_node/params/oscillation_planner.yaml
-#    -> writes the EEPROM Homing Offsets, ~/dynamixel_offsets.yaml (record) and
-#       the last-pose file the actuator uses as its startup hint; copy the
-#       printed raw_offsets_ticks into the YAML (reference-only log values).
+#    -> from the calibration.motor_deg_at_* readings in the YAML: verifies them,
+#       writes the EEPROM Homing Offsets, asks where the platform is now, and
+#       writes the last-pose file the actuator uses as its startup hint.
+#       Add --jog for the interactive jog / sign-check / capture tool.
 
 # 2b. (optional) pre-build the IK LUT (now on the 7:1 joint lattice).
 ros2 run ldlidar_node generate_ik_lut.py \
@@ -241,66 +242,54 @@ ros2 launch ldlidar_node dynamixel_bringup.launch.py
 
 ### Calibrating with a gearbox (cannot be moved by hand, large backlash)
 
-The reference pose can no longer be set by hand, and "physical zero" is not
-reachable inside the 30..85° range, so `dynamixel_calibrate.py` jogs the joints
-under torque and captures the reference from a measurement you can make.
+**From-params mode (default since 2026-09-22).** The reference is a pair of
+motor-side readings per servo — Present Position in degrees with Homing Offset
+0 (Dynamixel Wizard) at the top of the range (`h_max`, joint 85°) and at the
+bottom (`h_min`, joint 30°) — stored in `dynamixel_actuator.yaml`:
 
-1. **Start the tool** (command above). It sets Extended Position mode, clears
-   the Homing Offsets, enables torque *at the current position* (nothing moves)
-   and sets a slow jog profile (0.1 rad/s joint). Any jog that raises a
-   Present Load above `--load-abort-pct` (45 %) stops every motor where it is.
-2. **Sign check** (automatic): each joint is jogged +2° and back; you answer
-   whether the crank angle *increased*. If not, `gear.reversing` is wrong (or,
-   if only one theta motor misbehaves, that ID's `direction`); fix the YAML and
-   rerun. If the theta pair fights, the load abort fires — same diagnosis.
-3. **Jog to a mid-stroke pose** with a solid gravity preload, roughly 55–65°
-   (`t+5`, `all+2`, `a-1` … `s` shows ticks, load and the last move direction).
-   Do not calibrate near full extension: the gravity torque vanishes at the
-   toggle and the backlash floats.
-4. **`norm`** — backlash normalisation: every joint moves −2° then +2°, so the
-   final motion is *lifting*. Gravity always loads the reducer on that flank
-   during operation, so a capture after an upward move is consistent with how
-   the encoder relates to the crank while working. `cap` refuses if the last
-   move on any motor was downward.
-5. **Measure.** Put a spirit level on the platform plate (γ = 0) and measure
-   the central height **h, pivot line to pivot line** (the kinematic `h`), or
-   read the three crank angles with a protractor. Height is the better
-   reference: 1 mm of height error is ~0.1° of joint here, and one tape reading
-   gives all three angles through the forward kinematics (unique on 0..90°).
-6. **`cap h 1.05`** (or `cap h 1.05 g 3` with a known tilt, or `cap deg θ α β`).
-   The tool prints the angles it inferred, asks for confirmation, writes and
-   verifies each Homing Offset, saves the record, writes the **last-pose file**,
-   prints the `raw_offsets_ticks` for the YAML and the 30..85° envelope in
-   ticks, and reminds you about the wrap ambiguity.
-7. **`q`** (torque off) or `qon` (leave torque on). Then launch the actuator: it
-   reads the pose file and resolves the multi-turn wrap from it.
+```yaml
+calibration:
+  joint_at_max_deg: 85.0
+  joint_at_min_deg: 30.0
+  motor_deg_at_max: {'1': 230.0, '2': 500.0, '3': 180.0, '4': 415.0}
+  motor_deg_at_min: {'1': 615.0, '2': 885.0, '3': 565.0, '4': 800.0}
+```
 
-Backlash after calibration: the capture is exact for the loaded flank. When the
-ellipse reverses (twice per lap) the reducer crosses its lash; in velocity mode
-the per-motor loop shows it as a short error step in `/joint_states`, and in
-position mode as the servo overshooting through the lash. The ID1/ID3 vs
-ID2/ID4 asymmetry (`diagnostics/asymmetry.py`) now includes four independent
-lash amounts — measure it (jog +1/−1 and read the tick difference at zero
-load) before tuning gains around it.
+`dynamixel_calibrate.py` then, without moving anything:
+1. checks every span equals `gear.ratio × (85 − 30) = 385°` (±2°), that all
+   four share one joint-vs-tick sense, and that this sense equals
+   `direction × gear_sign` — otherwise it **refuses** and says which physical
+   fact to fix (re-mounted servos → `directions`; a non-reversing reducer →
+   `gear.reversing`);
+2. writes and reads back the EEPROM Homing Offsets
+   (`target = sense × ratio × 85° / 0.0879` at the h_max reading);
+3. asks **where the platform is now** (`max`, `min`, `k0` = the k=0 reading if
+   the multi-turn count has not been reset since the readings, or a joint
+   angle) and writes the last-pose file the actuator needs at startup;
+4. prints the height the platform should be at for that pose (tape-measure
+   check), the record (`dynamixel_offsets.yaml`) and the 30..85° envelope.
 
-### Bench procedure — answer Step 0, then evaluate velocity mode
+Measured 2026-09-22 (all spans exactly 385°, sense −79.64 ticks per joint
+degree on all four): offsets −9387 / −12459 / −8818 / −11492. The servos were
+re-mounted facing the other way with the reducers, so `directions` are now
+`+1` while `gear.reversing` stays `true`; the product (−1) is what the
+readings measure.
 
-1. `control.mode: 'position'` (the shipped default). Run the 3 laps. This is
-   the old mode with the profile registers now gear-scaled. Record: does the
-   wobble survive? Note `/joint_states` vs `/joint_goal` error and the reg[126]
-   peaks (now printed as joint N·m).
-2. If the wobble survives, read the gains printed at startup; try halving
-   Position P Gain(84) (RAM, not EEPROM) and repeat — the reflected inertia
-   fell by 49×.
-3. `control.mode: 'velocity'`. Same laps. Compare tracking error and
-   smoothness. Start with `kp: 6`, `ki: 0`; raise `kp` until it hunts, back off.
-4. Hold test: stop the planner mid-lap (watchdog → zero velocity). Measure sag
-   over 60 s. Then Ctrl-C (torque off) with hands clear: does it drop?
-5. Report which mode wins and whether the cycloid back-drives.
+**Jog mode** (`--jog`): the interactive tool for when no readings exist — jog
+under torque with a load-abort, ±2° sign check per joint, `norm` (−2°/+2° so
+the backlash sits on the flank gravity loads during operation), then
+`cap h <metres>` (platform level, height pivot-to-pivot → all three angles via
+the forward kinematics, unique on 0..90°) or `cap deg θ α β`. Calibrate at
+mid-stroke, not at the toggle where the gravity preload vanishes. The XC430's
+default P-only position loop parks a few ticks short of a goal under load;
+the tool reports that as steady-state error, not a fault.
 
-> **Bench safety:** first runs at a low `load_cutoff.joint_torque_nm` (e.g. 3.0)
-> and `control.velocity_limit_rad_s: 0.3`. If the θ pair (IDs 1 & 2) fight, one
-> `direction` is wrong — fix it in `motors.theta.directions`, not in `gear.*`.
+Backlash after calibration: the ellipse reverses twice per lap and the reducer
+crosses its lash there; in velocity mode the per-motor loop shows it as a short
+error step in `/joint_states`. The ID1/ID3 vs ID2/ID4 asymmetry
+(`diagnostics/asymmetry.py`) now includes four independent lash amounts —
+measure it (jog +1/−1 and read the tick difference at zero load) before tuning
+gains around it.
 
 ## Laps & feasibility (planner)
 

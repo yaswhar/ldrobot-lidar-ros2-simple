@@ -34,7 +34,25 @@ soft-limit band plus a pose hint. This tool writes the pose it calibrated at to
 the last-pose file (~/.cache/ldlidar_platform/last_pose.yaml) so the next
 actuator start knows where the platform is.
 
-Commands (interactive):
+FROM-PARAMS MODE (default, 2026-09-22): the calibration is computed from motor-
+side angles measured at the two ends of the range and stored in the params YAML:
+
+    calibration:
+      joint_at_max_deg: 85.0            # the pose called "h_max"
+      joint_at_min_deg: 30.0            # the pose called "h_min"
+      motor_deg_at_max: {'1': 230.0, '2': 500.0, '3': 180.0, '4': 415.0}
+      motor_deg_at_min: {'1': 615.0, '2': 885.0, '3': 565.0, '4': 800.0}
+
+(Present Position in degrees with Homing Offset = 0, e.g. from the Dynamixel
+Wizard.) The tool checks that every span equals gear_ratio x (max - min), that
+all motors share one sense, and that this sense agrees with directions x
+gear.reversing -- and refuses with the exact YAML fix if not. It then writes the
+Homing Offsets, verifies them, asks where the platform is NOW (the multi-turn
+count may have been reset since the readings), and writes the last-pose file.
+Nothing moves. Run with --jog for the interactive jog / sign-check / capture
+tool instead.
+
+Commands (interactive, --jog):
     t+2  t-0.5  a+1  b-1  all+1     jog a joint / all joints by JOINT deg
     s                               status: present ticks, load %, joint deg
     speed 0.1                       jog speed [rad/s, joint side]
@@ -131,6 +149,12 @@ class Config:
         startup = p.get('startup', {}) or {}
         self.reference = {n: float((cal.get('reference_deg') or {}).get(n, 0.0)) for n in JOINTS}
         self.offsets_file = os.path.expanduser(cal.get('offsets_file', '~/dynamixel_offsets.yaml'))
+        # measured end-of-range motor angles (from-params mode); keys may be int or str
+        self.joint_at_max = cal.get('joint_at_max_deg')
+        self.joint_at_min = cal.get('joint_at_min_deg')
+        self.motor_at_max = {int(k): float(v) for k, v in (cal.get('motor_deg_at_max') or {}).items()}
+        self.motor_at_min = {int(k): float(v) for k, v in (cal.get('motor_deg_at_min') or {}).items()}
+        self.has_measurements = bool(self.motor_at_max) and self.joint_at_max is not None
         self.pose_file = os.path.expanduser(startup.get('pose_file', POSE_FILE_DEFAULT) or '')
         self.joints = {}   # name -> {'ids': [...], 'dirs': [...], 'lim': (lo, hi)}
         for n in JOINTS:
@@ -186,6 +210,10 @@ class Bus:
     def w4(self, mid, addr, v):
         self.packet.write4ByteTxRx(self.port, mid, addr, int(v) & 0xFFFFFFFF)
 
+    def r1(self, mid, addr):
+        v, comm, err = self.packet.read1ByteTxRx(self.port, mid, addr)
+        return v if comm == 0 and err == 0 else -1
+
     def r4s(self, mid, addr):
         v, comm, err = self.packet.read4ByteTxRx(self.port, mid, addr)
         if comm != 0 or err != 0:
@@ -205,7 +233,8 @@ class Bus:
               + ', torque ON, slow profile...')
         for mid in self.ids:
             self.w1(mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
-            self.w1(mid, ADDR_OPERATING_MODE, OP_MODE_EXTENDED_POSITION)
+            if self.r1(mid, ADDR_OPERATING_MODE) != OP_MODE_EXTENDED_POSITION:
+                self.w1(mid, ADDR_OPERATING_MODE, OP_MODE_EXTENDED_POSITION)   # resets multi-turn count
             if clear_homing:
                 self.w4(mid, ADDR_HOMING_OFFSET, 0)
         self.set_speed(self.speed)
@@ -407,6 +436,146 @@ def envelope_report(cfg):
               f'last-pose file written above (or startup.expected_pose_deg.*).')
 
 
+# ----------------------------------------------------------------- from params
+SPAN_TOL_MOTOR_DEG = 2.0     # |measured span - ratio*(max-min)| allowed (0.3 joint deg at 7:1)
+
+
+def verify_measurements(cfg):
+    """Check the YAML end-of-range readings and derive the Homing Offsets.
+    Returns (sense, offsets) or raises ValueError with the exact fix."""
+    jmax, jmin = float(cfg.joint_at_max), float(cfg.joint_at_min)
+    if jmax <= jmin:
+        raise ValueError('calibration.joint_at_max_deg must be > joint_at_min_deg')
+    expected = cfg.ratio * (jmax - jmin)
+    senses, offsets = {}, {}
+    print('\nMeasured end-of-range readings (Present Position, Homing Offset 0):')
+    print(f'  {"ID":>3} {"joint":>6}{"motor@max":>11}{"motor@min":>11}{"span":>8}{"expected":>10}'
+          f'{"ticks/jdeg":>12}')
+    for mid, (n, d) in sorted(cfg.motor_of.items()):
+        if mid not in cfg.motor_at_max or mid not in cfg.motor_at_min:
+            raise ValueError(f'calibration.motor_deg_at_max/at_min: no entry for ID {mid}')
+        mx, mn = cfg.motor_at_max[mid], cfg.motor_at_min[mid]
+        span = mn - mx
+        if abs(abs(span) - expected) > SPAN_TOL_MOTOR_DEG:
+            raise ValueError(
+                f'ID {mid}: span {span:+.1f} motor deg between the two readings, but '
+                f'{cfg.ratio:g} x ({jmax:g} - {jmin:g}) = {expected:.1f} expected. Re-measure, or '
+                f'fix gear.ratio / joint_at_*_deg.')
+        sense = -1 if span > 0 else 1          # sign of d(ticks)/d(joint)
+        senses[mid] = sense
+        print(f'  {mid:>3} {n:>6}{mx:11.1f}{mn:11.1f}{span:8.1f}{expected:10.1f}'
+              f'{sense * cfg.ratio / DEG_PER_TICK:12.2f}')
+    if len(set(senses.values())) != 1:
+        ref = senses[min(senses)]
+        odd = [m for m, v in senses.items() if v != ref]
+        raise ValueError(f'IDs {odd} have the opposite joint-vs-tick sense from the others: '
+                         f'check their readings, or flip their motors.<joint>.directions.')
+    sense = senses[min(senses)]
+    bad = [mid for mid, (n, d) in cfg.motor_of.items() if d * cfg.gsign != sense]
+    if bad:
+        if len(bad) == len(cfg.motor_of):
+            raise ValueError(
+                f'measured sense is {sense:+d} ticks per +joint deg on EVERY motor, but directions x '
+                f'gear.reversing give {-sense:+d}. One of the two physical facts in the YAML is '
+                f'wrong: if the servos were re-mounted the other way round, flip ALL '
+                f'motors.<joint>.directions; if the reducer does not actually reverse, flip '
+                f'gear.reversing. (2026-09-22 build: reversing cycloid + re-mounted servos '
+                f'-> directions +1, reversing true.)')
+        raise ValueError(
+            f'measured sense is {sense:+d} on IDs {bad} but their directions give the opposite: '
+            f'flip motors.<joint>.directions for those IDs and re-run.')
+    target_max = int(round(sense * cfg.ratio * jmax / DEG_PER_TICK))
+    for mid in cfg.motor_of:
+        raw_max = int(round(cfg.motor_at_max[mid] / DEG_PER_TICK))
+        offsets[mid] = target_max - raw_max
+        if abs(offsets[mid]) > HOMING_OFFSET_RANGE:
+            raise ValueError(f'ID {mid}: Homing Offset {offsets[mid]} out of +/-{HOMING_OFFSET_RANGE}')
+    print(f'  -> sense {sense:+d}: raw ticks {"DECREASE" if sense < 0 else "increase"} as the joint '
+          f'rises; directions x gear.reversing agree.')
+    return sense, offsets
+
+
+def calibrate_from_params(cfg, bus, offsets_file):
+    sense, offsets = verify_measurements(cfg)
+    jmax, jmin = float(cfg.joint_at_max), float(cfg.joint_at_min)
+    k_tick = sense * cfg.ratio / DEG_PER_TICK       # ticks per joint deg
+    print('\nWriting Homing Offsets (torque OFF, nothing moves):')
+    for mid in bus.ids:
+        bus.w1(mid, ADDR_TORQUE_ENABLE, TORQUE_DISABLE)
+        if bus.r1(mid, ADDR_OPERATING_MODE) != OP_MODE_EXTENDED_POSITION:
+            bus.w1(mid, ADDR_OPERATING_MODE, OP_MODE_EXTENDED_POSITION)
+        bus.w4(mid, ADDR_HOMING_OFFSET, offsets[mid])
+    time.sleep(0.1)
+    readback = {}
+    for mid in bus.ids:
+        ho = bus.r4s(mid, ADDR_HOMING_OFFSET)
+        if ho != offsets[mid]:
+            print(f'  !! ID{mid}: Homing Offset read back {ho}, wrote {offsets[mid]} -- aborting.')
+            return None
+        readback[mid] = bus.present(mid)
+    # where is the platform now?  The readings' multi-turn baseline may be gone
+    # (power cycle since), so the k=0 interpretation is only a suggestion.
+    print(f'  {"ID":>3}{"offset":>9}{"present":>9}   joint deg if k=0   (alternatives, one motor rev apart)')
+    k0 = {}
+    for mid in bus.ids:
+        n, _d = cfg.motor_of[mid]
+        pres = readback[mid]
+        q0 = pres / k_tick
+        alts = ', '.join(f'{(pres - k * TICKS_PER_REV) / k_tick:.1f}' for k in (-1, 1))
+        k0[n] = q0
+        print(f'  {mid:>3}{offsets[mid]:9d}{pres:9d}   {q0:8.1f}          ({alts})')
+    lo = min(j['lim'][0] for j in cfg.joints.values())
+    hi = max(j['lim'][1] for j in cfg.joints.values())
+    plausible = all(lo - 5.0 <= q <= hi + 5.0 for q in k0.values())
+    print("\nWhere is the platform NOW?  This becomes the actuator's startup hint.")
+    print(f'   max  = the h_max pose (joint {jmax:g})      min = the h_min pose (joint {jmin:g})')
+    print('   k0   = accept the k=0 column above' + (' (plausible)' if plausible else ' (NOT plausible)'))
+    print('   <deg> = a joint angle, same on all joints    skip = write no pose file')
+    while True:
+        try:
+            ans = input('now> ').strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = 'skip'
+        if ans == 'max':
+            pose = {n: jmax for n in JOINTS}
+        elif ans == 'min':
+            pose = {n: jmin for n in JOINTS}
+        elif ans == 'k0':
+            pose = dict(k0)
+        elif ans == 'skip':
+            pose = None
+        else:
+            try:
+                pose = {n: float(ans) for n in JOINTS}
+            except ValueError:
+                print('   ? max | min | k0 | <deg> | skip')
+                continue
+        break
+    record = {'mode': 'from_params', 'gear_ratio': cfg.ratio, 'gear_sign': cfg.gsign,
+              'sense_ticks_per_joint_deg': k_tick,
+              'joint_at_max_deg': jmax, 'joint_at_min_deg': jmin,
+              'motor_deg_at_max': cfg.motor_at_max, 'motor_deg_at_min': cfg.motor_at_min,
+              'homing_offset_ticks': offsets, 'pose_deg_now': pose}
+    os.makedirs(os.path.dirname(os.path.abspath(offsets_file)), exist_ok=True)
+    with open(offsets_file, 'w') as fh:
+        yaml.safe_dump(record, fh, default_flow_style=False)
+    print(f'\n  calibration record -> {offsets_file}')
+    if pose:
+        if write_pose_file(cfg.pose_file, pose, offsets, 'dynamixel_calibrate'):
+            print(f'  last-pose file    -> {cfg.pose_file}  '
+                  f'({", ".join(f"{n} {v:.1f}" for n, v in pose.items())})')
+        h = cfg.kin.h_center(pose['theta'])
+        if h is not None:
+            print(f'  tape-measure check: at theta {pose["theta"]:.1f} deg the platform should sit at '
+                  f'h = {h:.3f} m (pivot line to pivot line, level)')
+    else:
+        print('  no pose file written: set startup.expected_pose_deg.* before launching the actuator.')
+    print('  raw_offsets_ticks for the params YAML (reference-only): '
+          + ', '.join(f'ID{m}={(-offsets[m]) % TICKS_PER_REV}' for m in sorted(offsets)))
+    envelope_report(cfg)
+    return record
+
+
 # ----------------------------------------------------------------- sign check
 def sign_check(cfg, bus, step=2.0):
     print('\nSIGN CHECK -- each joint is jogged +%.1f deg (joint) and back. Watch the crank.' % step)
@@ -445,7 +614,7 @@ def repl(cfg, bus, offsets_file):
         c = parts[0].lower()
         try:
             if c == 'help':
-                print(__doc__.split('Commands (interactive):')[1].split('Usage:')[0])
+                print(__doc__.split('Commands (interactive, --jog):')[1].split('Usage:')[0])
             elif c in ('s', 'status'):
                 bus.status(homed=calibrated is not None)
             elif c == 'speed' and len(parts) == 2:
@@ -517,6 +686,9 @@ def main():
     ap.add_argument('--geometry', nargs=4, type=float, metavar=('A', 'B', 'C', 'D'),
                     help='override geometry a b c d [m]')
     ap.add_argument('--out', default=None, help='override the calibration record path')
+    ap.add_argument('--jog', action='store_true',
+                    help='interactive jog / sign-check / capture tool (default when the YAML has '
+                         'no calibration.motor_deg_at_* block)')
     ap.add_argument('--no-sign-check', action='store_true', help='skip the +2/-2 deg sign check')
     ap.add_argument('--keep-homing', action='store_true',
                     help='do NOT clear the Homing Offsets (jog-only session)')
@@ -536,6 +708,17 @@ def main():
     print('  homed ticks = round(direction * %+d * %g * joint_deg * 4096/360)' % (cfg.gsign, cfg.ratio))
     print('  SAFETY: keep hands clear; a jog that raises any Present Load above '
           f'{args.load_abort_pct:.0f} % stops all motors where they are.')
+
+    if cfg.has_measurements and not args.jog:
+        try:
+            verify_measurements(cfg)            # fail fast, before touching the bus
+        except ValueError as exc:
+            print(f'\nERROR: {exc}', file=sys.stderr)
+            sys.exit(1)
+        bus = Bus(cfg, args.load_abort_pct)
+        rec = calibrate_from_params(cfg, bus, offsets_file)
+        bus.close()
+        sys.exit(0 if rec else 1)
 
     bus = Bus(cfg, args.load_abort_pct)
     bus.prepare(clear_homing=not args.keep_homing)

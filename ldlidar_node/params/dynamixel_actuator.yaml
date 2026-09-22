@@ -19,6 +19,10 @@
     # --- GEARBOX between each motor and its crank (fitted 2026-09) ---
     # Single-stage cycloidal reducer, 8 ring pins / 7 lobes -> 7:1, REVERSING
     # (output turns opposite to input). See gearbox/cycloid_review.py.
+    # NOTE the servos were RE-MOUNTED with the reducers, which flipped their own
+    # shaft sense (see motors.*.directions); the reducer's reversal is a separate
+    # fact and stays true. Only the product direction x gear_sign (= -1) reaches
+    # the runtime, and it was measured on 2026-09-22 (see calibration below).
     #   motor_deg = gear_sign * ratio * joint_deg    (gear_sign = -1 if reversing)
     #   motor rad/s (and rad/s^2) = ratio * joint rad/s
     #   joint N.m = motor N.m * ratio * efficiency
@@ -34,27 +38,30 @@
       stall_torque_nm: 1.5   # XC430-W150-T; only used to turn Present Load into N.m
 
     # --- logical joint -> physical motor mapping ---
-    # "theta" is TWO motors (IDs 1 & 2); alpha/beta are single motors. All four
-    # resolve to the SAME direction (-1): raw ticks DECREASE as the motor's own
-    # output angle increases. Per-motor zero is handled by EEPROM Homing Offset,
-    # so the two theta motors receive IDENTICAL goal ticks after calibration.
-    # raw_offsets_ticks are the bench-measured raw ticks at physical 0 deg and
-    # are used ONLY for the startup sanity log (runtime zero = Homing Offset).
-    # !! They are STALE after re-gearing: re-run dynamixel_calibrate.py and copy
-    #    its raw_at_zero values here.
+    # "theta" is TWO motors (IDs 1 & 2); alpha/beta are single motors.
+    # directions = the raw-tick sense of the motor's OWN output shaft in the
+    # mechanism's positive-angle sense. Direct-drive build (2026-08): -1 on all
+    # four. 2026-09-22: the servos were re-mounted with the reducers, facing the
+    # other way, so all four are now +1; through the reversing cycloid the
+    # joint-vs-tick sense is (+1)(-1) = -1: raw ticks DECREASE as the joint
+    # rises (measured: ID1 230 -> 615 motor deg for joint 85 -> 30).
+    # Per-motor zero is handled by EEPROM Homing Offset, so the two theta motors
+    # receive IDENTICAL goal ticks after calibration.
+    # raw_offsets_ticks = raw single-turn ticks at joint 0 deg implied by the
+    # 2026-09-22 calibration; used ONLY for the startup sanity log.
     motors:
       theta:
         ids: [1, 2]
-        directions: [-1, -1]
-        raw_offsets_ticks: [2048, 618]   # reference only (startup log) -- re-measure
+        directions: [1, 1]
+        raw_offsets_ticks: [1195, 171]   # reference only (startup log)
       alpha:
         ids: [3]
-        directions: [-1]
-        raw_offsets_ticks: [1024]        # reference only (startup log) -- re-measure
+        directions: [1]
+        raw_offsets_ticks: [626]         # reference only (startup log)
       beta:
         ids: [4]
-        directions: [-1]
-        raw_offsets_ticks: [3072]        # reference only (startup log) -- re-measure
+        directions: [1]
+        raw_offsets_ticks: [3300]        # reference only (startup log)
 
     # --- per-logical-joint soft angle limits (JOINT / output deg) -- SAFETY BACKSTOP
     # Enforced on EVERY goal regardless of what a (future lidar) planner asks; in
@@ -144,10 +151,19 @@
 
     # --- calibration (used by dynamixel_calibrate.py; the actuator node ignores
     #     these -- runtime zero lives in each motor's EEPROM Homing Offset).
-    #     The calibrator reads gear.* above too. RE-RUN IT: every Homing Offset
-    #     stored before the gearboxes were fitted is stale. ---
+    # FROM-PARAMS mode (default): motor-side Present Position in degrees, read
+    # with Homing Offset = 0 (Dynamixel Wizard), at the two ends of the range,
+    # measured 2026-09-22. The calibrator verifies each span = 7 x (85 - 30) =
+    # 385 deg and one common sense, checks it against directions x gear.reversing,
+    # writes the Homing Offsets so Present == ticks(joint) and asks where the
+    # platform is now (for the startup pose file). Nothing moves.
+    # Re-measure after ANY change to the motor/reducer/crank coupling.
     calibration:
-      reference_deg: {theta: 0.0, alpha: 0.0, beta: 0.0}  # physical-zero pose (JOINT)
+      joint_at_max_deg: 85.0            # the "h_max" pose = joint 85 deg (platform up)
+      joint_at_min_deg: 30.0            # the "h_min" pose = joint 30 deg (platform down)
+      motor_deg_at_max: {'1': 230.0, '2': 500.0, '3': 180.0, '4': 415.0}
+      motor_deg_at_min: {'1': 615.0, '2': 885.0, '3': 565.0, '4': 800.0}
+      reference_deg: {theta: 0.0, alpha: 0.0, beta: 0.0}  # only for `cap ref` in --jog mode
       offsets_file: '~/dynamixel_offsets.yaml'            # record output path
 
     # --- timing / topics / logging ---
