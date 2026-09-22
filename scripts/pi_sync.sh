@@ -90,19 +90,28 @@ docker exec "$DEV" bash -lc "
     || { echo '   ERROR: install space does not contain the new files'; exit 1; }
 "
 
-say "5. desktop files -> $DESKTOP (backups: *.bak-$STAMP)"
+say "5. desktop files -> $DESKTOP"
 TMP=$(mktemp -d)
 docker cp "$DEV:$SRC/scripts/desktop/." "$TMP/"
 mkdir -p "$DESKTOP"
+# Scripts and .desktop entries are regenerated from the repo: never backed up (a
+# .desktop.bak still shows up as a launcher icon). A YAML is backed up only if
+# it was hand-edited (differs from the version being installed).
 for f in "$TMP"/*; do
   b=$(basename "$f")
-  [ -f "$DESKTOP/$b" ] && cp -p "$DESKTOP/$b" "$DESKTOP/$b.bak-$STAMP"
+  case "$b" in
+    *.yaml)
+      if [ -f "$DESKTOP/$b" ] && ! cmp -s "$f" "$DESKTOP/$b"; then
+        cp -p "$DESKTOP/$b" "$DESKTOP/$b.bak-$STAMP"
+        echo "   $b differed from the repo version -> kept as $b.bak-$STAMP"
+      fi ;;
+  esac
   cp "$f" "$DESKTOP/$b"
 done
 chmod +x "$DESKTOP"/*.sh "$DESKTOP"/*.desktop
 rm -rf "$TMP"
-# redundant files: keep only this run's backups; drop hand-made launchers that
-# duplicate launch_dynamixel.desktop (same Exec target)
+# redundant files: every older backup; hand-made launchers that duplicate
+# launch_dynamixel.desktop (same Exec target)
 find "$DESKTOP" -maxdepth 1 -name '*.bak-*' ! -name "*.bak-$STAMP" -print -delete | sed 's|.*/|   removed old backup |'
 for f in "$DESKTOP"/*.desktop; do
   case "$(basename "$f")" in launch_dynamixel.desktop|calibrate_dynamixel.desktop) continue ;; esac
